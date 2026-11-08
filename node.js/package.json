@@ -1,0 +1,22 @@
+{
+  "name": "betium-node",
+  "version": "5.0.0",
+  "description": "Betium (BETM) full node, wallet and miner - Node.js port. Zero npm dependencies.",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "betium-node": "node.js",
+    "betium-wallet": "wallet.js",
+    "betium-miner": "miner.js"
+  },
+  "scripts": {
+    "start": "node node.js",
+    "wallet": "node wallet.js",
+    "miner": "node miner.js",
+    "selftest": "node ethcompat.js selftest",
+    "test": "node test/selftest.js && node test/e2e.js"
+  }
+}

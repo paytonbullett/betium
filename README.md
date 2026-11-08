@@ -55,27 +55,22 @@ node -v    # must print v22.13 or newer
 
 ## Run it
 
-Run these from inside the `betium` folder.
+From inside the `betium` folder, run the launcher and enter your node's public URL when asked:
 
-**Python version**
 ```bash
-python3 node.py https://your.node.url                         # run a node
-python3 node.py https://your.node.url https://other.node.url  # ...with a bootstrap peer
-python3 wallet.py                                             # wallet
-python3 miner.py <YOUR_ADDRESS> http://127.0.0.1:5000         # miner
+bash run.sh
 ```
 
-**Node.js version**
-```bash
-node node.js https://your.node.url                            # run a node
-node node.js https://your.node.url https://other.node.url     # ...with a bootstrap peer
-node wallet.js                                                # wallet
-node miner.js <YOUR_ADDRESS> http://127.0.0.1:5000            # miner
+```
+Your node URL: https://mynode.example.com
 ```
 
-Both nodes listen on port 5000 and download and verify the whole chain automatically on first start. Use `-h` on any script to see its commands.
+It starts your node together with the default bootstrap peer, `https://crypto.bullettsocial.space`. The node then finds every other node on the network, announces itself, and downloads and verifies the whole chain. After the first run it remembers your URL and its peers.
 
----
+- Your URL must be reachable by other nodes (a public address, not `localhost` or `192.168.x.x`). A private address still syncs the chain but can't be found by others.
+- On Linux with `screen` installed, the node runs in the background. Attach with `screen -r betium` and stop with `screen -S betium -X quit`.
+- To use a different bootstrap peer: `BETIUM_BOOTSTRAP=https://other.node bash run.sh`
+- Manual start: `python3 node.py <your_url> <bootstrap_url>` or `node node.js <your_url> <bootstrap_url>`
 
 ## Authorship & Project Attribution
 

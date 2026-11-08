@@ -13,7 +13,7 @@ ONE = Decimal("0.00000001")
 MAX_SUPPLY = 2_000_000 * UNITS
 # 0.0625 BETM × 240 blocks/hour (15 s target) = 15 BETM/hour.
 BLOCK_REWARD = 6_250_000           # 0.0625 BETM
-HALVING_INTERVAL = 100_000
+HALVING_INTERVAL = 1_000_000_000
 # Hard ceiling: coinbase rewards in any rolling 3600 s window cannot exceed this,
 # even if blocks arrive faster than the 15 s target.
 MAX_EMISSION_PER_HOUR = 15 * UNITS  # 15 BETM

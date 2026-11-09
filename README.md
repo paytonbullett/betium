@@ -11,10 +11,24 @@ This repository contains two interchangeable implementations of the same protoco
 
 | Folder | Version | Needs |
 |---|---|---|
-| `python/` | Python node, wallet and miner | Python 3.10+ |
-| `nodejs/` | Node.js node, wallet and miner | Node.js 22.13+ (no npm install) |
+| `python/` | Python node, wallet and miner | Python 3.8+ (3.10+ recommended) |
+| `node.js/` | Node.js node, wallet and miner | Node.js 22.13+ (no npm install) |
 
-They share the same genesis, block format and database, so nodes of either kind can sync with each other.
+They share the same genesis, block format and database, so nodes of either kind can sync with each other. Each folder contains the node, wallet, miner, and the launchers `run.sh`, `run.bat`, `run.ps1` and `setup-proxy.sh`.
+
+---
+
+## Requirements
+
+**Python version**
+- Python **3.8+** (3.10+ recommended)
+- Linux, macOS or Windows. The launcher installs `flask`, `requests` and `ecdsa` into a local `.venv` automatically.
+- `screen` (optional, Linux only, runs the node in the background)
+
+**Node.js version**
+- Node.js **22.13+** (uses the built-in `node:sqlite`, nothing to install)
+- Linux, macOS or Windows
+- `screen` (optional, Linux only, runs the node in the background)
 
 ---
 
@@ -44,15 +58,6 @@ python --version    # must be 3.8 or newer
 
 If a `betium` folder already exists, run `Remove-Item -Recurse -Force betium` first. Otherwise `Move-Item` puts the new files inside the old folder.
 
-Then start it by double-clicking `run.bat`, or from PowerShell:
-```powershell
-.\run.bat
-```
-If PowerShell blocks scripts, use this instead:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1
-```
-
 ### Linux / macOS
 
 **Node.js version**
@@ -71,19 +76,7 @@ cd betium
 python3 --version    # must be 3.8 or newer
 ```
 
-Then start it with `bash run.sh`.
----
-
-## Requirements
-
-**Python version**
-- Python **3.10+** recommended (3.8+ minimum)
-- Linux (recommended) or any OS that can run the Python dependencies
-- `screen` (for the recommended start method on Linux)
-
-**Node.js version**
-- Node.js **22.13+** (uses the built-in `node:sqlite`, nothing to install)
-- `screen` (optional, used by `start.sh` on Linux)
+If a `betium` folder already exists, run `rm -rf betium` first.
 
 ---
 
@@ -96,7 +89,15 @@ Start the launcher from inside the `betium` folder. It asks for your node's publ
 bash run.sh
 ```
 
-**Windows**: double-click `run.bat` (or run `run.sh` from Git Bash, which hands over to it automatically).
+**Windows**: double-click `run.bat`, or from PowerShell:
+```powershell
+.\run.bat
+```
+If PowerShell blocks scripts, use this instead:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+(Running `run.sh` from Git Bash also works: it hands over to `run.ps1` automatically.)
 
 ```
 Your node URL: https://mynode.example.com
@@ -119,8 +120,27 @@ It then installs the packages, writes the config, gets the certificate, and star
 
 - Your URL must be public. A `localhost` or `192.168.x.x` address still syncs the chain, but other nodes can't find it.
 - On Linux with `screen` installed, the node runs in the background. Attach with `screen -r betium` and stop with `screen -S betium -X quit`.
-- To use a different bootstrap peer: `BETIUM_BOOTSTRAP=https://other.node bash run.sh`
+- To use a different bootstrap peer:
+  - Linux / macOS: `BETIUM_BOOTSTRAP=https://other.node bash run.sh`
+  - Windows (PowerShell): `$env:BETIUM_BOOTSTRAP = "https://other.node"; .\run.bat`
 - Manual start: `python3 node.py <your_url> <bootstrap_url>` or `node node.js <your_url> <bootstrap_url>`
+
+---
+
+## Wallet and miner
+
+Run these from the `betium` folder. Point them at a node the first time by setting `BETIUM_NODE` (the miner can also take the node URL as its second argument):
+
+```bash
+export BETIUM_NODE=https://crypto.bullettsocial.space      # PowerShell: $env:BETIUM_NODE = "https://crypto.bullettsocial.space"
+
+node wallet.js                                              # Python: python3 wallet.py
+node miner.js <YOUR_ADDRESS> https://crypto.bullettsocial.space   # Python: python3 miner.py ...
+```
+
+Use `-h` on any script to see its commands.
+
+---
 
 ## Authorship & Project Attribution
 

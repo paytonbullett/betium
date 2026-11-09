@@ -55,19 +55,35 @@ node -v    # must print v22.13 or newer
 
 ## Run it
 
-From inside the `betium` folder, run the launcher and enter your node's public URL when asked:
+Start the launcher from inside the `betium` folder. It asks for your node's public URL, then starts your node together with the default bootstrap peer, `https://crypto.bullettsocial.space`.
 
+**Linux / macOS / Termux**
 ```bash
 bash run.sh
 ```
+
+**Windows**: double-click `run.bat` (or run `run.sh` from Git Bash, which hands over to it automatically).
 
 ```
 Your node URL: https://mynode.example.com
 ```
 
-It starts your node together with the default bootstrap peer, `https://crypto.bullettsocial.space`. The node then finds every other node on the network, announces itself, and downloads and verifies the whole chain. After the first run it remembers your URL and its peers.
+The node listens on **port 5000** by default. It finds every other node on the network, announces itself, and downloads and verifies the whole chain. After the first run it remembers your URL and its peers.
 
-- Your URL must be reachable by other nodes (a public address, not `localhost` or `192.168.x.x`). A private address still syncs the chain but can't be found by others.
+### Optional: web server + SSL (Linux)
+
+If your URL is a domain name, `run.sh` offers to set up **nginx or Apache** in front of your node with HTTPS. This gives you a public `https://` address, which MetaMask and browsers need. It asks:
+
+- which web server to use (nginx or Apache)
+- whether the domain uses Cloudflare, and whether the orange-cloud proxy is on
+- how to get the certificate: a free Let's Encrypt certificate, a certificate you already have (such as a Cloudflare Origin Certificate), or none
+- your email for expiry notices (optional), and whether to open ports 80 and 443 in the firewall
+
+It then installs the packages, writes the config, gets the certificate, and starts the server. Requirements: root or `sudo`, and a domain whose DNS already points at your server. You can skip it now and run it later with `sudo bash setup-proxy.sh https://your.domain`. On Windows, use a Cloudflare Tunnel or run the Linux version in WSL.
+
+### Notes
+
+- Your URL must be public. A `localhost` or `192.168.x.x` address still syncs the chain, but other nodes can't find it.
 - On Linux with `screen` installed, the node runs in the background. Attach with `screen -r betium` and stop with `screen -S betium -X quit`.
 - To use a different bootstrap peer: `BETIUM_BOOTSTRAP=https://other.node bash run.sh`
 - Manual start: `python3 node.py <your_url> <bootstrap_url>` or `node node.js <your_url> <bootstrap_url>`

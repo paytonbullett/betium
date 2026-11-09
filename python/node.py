@@ -1297,7 +1297,12 @@ class Blockchain:
 
     @staticmethod
     def _tx_view(tx, block_index, block_hash, timestamp, tx_index):
-        """One confirmed transaction as returned by the search endpoints."""
+        """One confirmed transaction as returned by the search endpoints.
+
+        Returns both NETWORK coinbase rewards and every user-to-user (P2P)
+        transfer / create_token / eth_raw transaction that was included in the
+        block. Newest-first ordering is applied by the caller.
+        """
         try:
             if tx.get("eth_raw"):
                 tx_hash = ethcompat.decode_raw_tx(tx["eth_raw"])["hash"]
@@ -1306,20 +1311,29 @@ class Blockchain:
                 tx_hash = hashlib.sha256(dumps(canonical_tx(tx)).encode()).hexdigest()
         except Exception:
             tx_hash = None
+        sender = tx.get("sender")
+        action = tx.get("action")
+        if sender == "NETWORK":
+            tx_type = "reward"
+        elif action:
+            tx_type = action
+        else:
+            tx_type = "transfer"
         view = {
             "tx_hash": tx_hash,
             "block_index": block_index,
             "block_hash": block_hash,
             "tx_index": tx_index,
             "timestamp": timestamp,
-            "sender": tx.get("sender"),
+            "sender": sender,
             "recipient": tx.get("recipient"),
             "amount": parse_units(tx.get("amount")),
             "fee": parse_units(tx.get("fee")) or 0,
             "token_id": tx.get("token_id") or NATIVE_TOKEN,
+            "type": tx_type,
         }
-        if tx.get("action"):
-            view["action"] = tx["action"]
+        if action:
+            view["action"] = action
         return view
 
     def scan_transactions(self, limit, address=None):
@@ -1347,11 +1361,20 @@ class Blockchain:
                 if not rows:
                     break
                 for idx, ts, bhash, raw in rows:
-                    txs = json.loads(raw)
+                    try:
+                        txs = json.loads(raw)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(txs, list):
+                        continue
+                    # Walk newest-first inside the block so P2P transfers that sit
+                    # before the coinbase reward still appear in chronological order.
                     for i in range(len(txs) - 1, -1, -1):
                         if len(out) >= limit:
                             break
                         tx = txs[i]
+                        if not isinstance(tx, dict):
+                            continue
                         if address and address not in (
                             str(tx.get("sender")).lower(), str(tx.get("recipient")).lower()
                         ):

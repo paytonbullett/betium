@@ -302,6 +302,7 @@ def send_transaction(private_key_hex, sender, recipient, amount_text, token_id=N
         "amount": amount,
         "fee": TRANSFER_FEE,
         "nonce": nonce + 1,
+        "action": "transfer",
     }
     if token_id != NATIVE_TOKEN:
         payload["token_id"] = token_id

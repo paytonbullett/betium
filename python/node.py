@@ -1338,13 +1338,20 @@ class Blockchain:
             view["action"] = action
         return view
 
-    def scan_transactions(self, limit, address=None, token_id=None):
-        """Read-only. Newest-first confirmed transactions, optionally filtered by
-        `address` (lowercase sender/recipient) and/or `token_id`. Walks blocks from
-        the tip down and stops as soon as `limit` results are found. Never touches
-        state or the mempool."""
+    def scan_transactions(self, limit, address=None, token_id=None, only_rewards=False, exclude_rewards=False):
+        """Read-only. Newest-first confirmed transactions.
+
+        Filters (all optional):
+          address         – lowercase sender or recipient match
+          token_id        – only this token (BETM or sub-token)
+          only_rewards    – only NETWORK coinbase rewards
+          exclude_rewards – drop NETWORK rewards (P2P / token activity only)
+
+        Walks blocks from the tip down and stops as soon as `limit` results are
+        found. Never touches state or the mempool.
+        """
         out = []
-        like = '%"' + address + '"%' if address else None  # cheap pre-filter, exact match below
+        like = '%"' + address + '"%' if address else None  # cheap pre-filter, exact match exact match below
         want_token = token_id.upper() if token_id else None
         conn = self.connect()
         try:
@@ -1378,6 +1385,11 @@ class Blockchain:
                             break
                         tx = txs[i]
                         if not isinstance(tx, dict):
+                            continue
+                        is_reward = tx.get("sender") == "NETWORK"
+                        if only_rewards and not is_reward:
+                            continue
+                        if exclude_rewards and is_reward:
                             continue
                         if address and address not in (
                             str(tx.get("sender")).lower(), str(tx.get("recipient")).lower()
@@ -1705,15 +1717,28 @@ def _parse_limit():
 
 @app.route("/transactions/recent", methods=["GET"])
 def recent_transactions():
+    """Trading feed: only real user transfers / token activity (no mining rewards)."""
     limit = _parse_limit()
     if limit is None:
         return jsonify({"success": False, "error": "limit must be a positive integer"}), 400
-    txs = blockchain.scan_transactions(limit)
+    token_id = request.args.get("token_id") or None
+    txs = blockchain.scan_transactions(limit, token_id=token_id, exclude_rewards=True)
+    return jsonify({"success": True, "count": len(txs), "transactions": txs})
+
+
+@app.route("/transactions/rewards", methods=["GET"])
+def recent_rewards():
+    """Mining reward history only (sender == NETWORK)."""
+    limit = _parse_limit()
+    if limit is None:
+        return jsonify({"success": False, "error": "limit must be a positive integer"}), 400
+    txs = blockchain.scan_transactions(limit, only_rewards=True)
     return jsonify({"success": True, "count": len(txs), "transactions": txs})
 
 
 @app.route("/address/<address>/transactions", methods=["GET"])
 def address_transactions(address):
+    """Full history for one address (transfers + any rewards received)."""
     address = address.lower()
     if not ethcompat.valid_account_id(address):
         return jsonify({
@@ -1729,14 +1754,14 @@ def address_transactions(address):
 
 @app.route("/token/<token_id>/transactions", methods=["GET"])
 def token_transactions(token_id):
-    """Newest-first confirmed transactions for a specific token (BETM or sub-token)."""
+    """Newest-first confirmed transactions for a specific token (excludes mining rewards)."""
     token_id = (token_id or "").strip()
     if not token_id:
         return jsonify({"success": False, "error": "token_id required"}), 400
     limit = _parse_limit()
     if limit is None:
         return jsonify({"success": False, "error": "limit must be a positive integer"}), 400
-    txs = blockchain.scan_transactions(limit, token_id=token_id)
+    txs = blockchain.scan_transactions(limit, token_id=token_id, exclude_rewards=True)
     return jsonify({
         "success": True,
         "token_id": token_id.upper() if token_id.upper() == NATIVE_TOKEN else token_id,

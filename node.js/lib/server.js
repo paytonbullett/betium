@@ -136,13 +136,24 @@ function createServer(chain) {
     return Math.min(500, Number(raw));
   };
 
+  // Trading feed: only real user transfers / token activity (no mining rewards).
   add(['GET'], /^\/transactions\/recent$/, async ({ query }) => {
     const limit = parseLimit(query);
     if (limit === null) return [400, { success: false, error: 'limit must be a positive integer' }];
-    const transactions = chain.scanTransactions(limit);
+    const tokenId = query.get('token_id') || null;
+    const transactions = chain.scanTransactions(limit, null, tokenId, false, true); // excludeRewards=true
     return [200, { success: true, count: transactions.length, transactions }];
   });
 
+  // Mining reward history only (sender == NETWORK).
+  add(['GET'], /^\/transactions\/rewards$/, async ({ query }) => {
+    const limit = parseLimit(query);
+    if (limit === null) return [400, { success: false, error: 'limit must be a positive integer' }];
+    const transactions = chain.scanTransactions(limit, null, null, true, false); // onlyRewards=true
+    return [200, { success: true, count: transactions.length, transactions }];
+  });
+
+  // Full history for one address (transfers + any rewards received).
   add(['GET'], /^\/address\/([^/]+)\/transactions$/, async ({ m, query }) => {
     const address = m[1].toLowerCase();
     if (!eth.validAccountId(address)) {
@@ -154,13 +165,13 @@ function createServer(chain) {
     return [200, { success: true, address, count: transactions.length, transactions }];
   });
 
-  // Newest-first confirmed transactions for a specific token (BETM or sub-token).
+  // Newest-first confirmed transactions for a specific token (excludes mining rewards).
   add(['GET'], /^\/token\/([^/]+)\/transactions$/, async ({ m, query }) => {
     const tokenId = (m[1] || '').trim();
     if (!tokenId) return [400, { success: false, error: 'token_id required' }];
     const limit = parseLimit(query);
     if (limit === null) return [400, { success: false, error: 'limit must be a positive integer' }];
-    const transactions = chain.scanTransactions(limit, null, tokenId);
+    const transactions = chain.scanTransactions(limit, null, tokenId, false, true); // excludeRewards=true
     const displayId = tokenId.toUpperCase() === NATIVE_TOKEN ? NATIVE_TOKEN : tokenId;
     return [200, { success: true, token_id: displayId, count: transactions.length, transactions }];
   });

@@ -1073,6 +1073,7 @@ class Blockchain {
     const action = tx.action;
     let txType;
     if (sender === 'NETWORK') txType = 'reward';
+    else if (action === 'create_token') txType = 'token_create';
     else if (action) txType = action;
     else txType = 'transfer';
     const view = {
@@ -1086,21 +1087,22 @@ class Blockchain {
       amount: parseUnits(tx.amount),
       fee: parseUnits(tx.fee) || 0,
       token_id: tx.token_id || NATIVE_TOKEN,
-      type: txType,
+      tx_type: txType,
     };
     if (action) view.action = action;
     return view;
   }
 
   /**
-   * Read-only. Newest-first confirmed transactions, optionally only those where `address`
-   * (lowercase) is sender or recipient. Walks blocks from the tip down and stops as soon as
-   * `limit` results are found. Never touches state, the mempool or consensus.
-   * Flattens every transaction in each block (rewards + P2P transfers).
+   * Read-only. Newest-first confirmed transactions, optionally filtered by
+   * `address` (lowercase sender/recipient) and/or `tokenId`. Walks blocks from
+   * the tip down and stops as soon as `limit` results are found. Never touches
+   * state, the mempool or consensus. Flattens every transaction in each block.
    */
-  scanTransactions(limit, address = null) {
+  scanTransactions(limit, address = null, tokenId = null) {
     const out = [];
     const like = address ? `%"${address}"%` : null; // cheap pre-filter, exact match below
+    const wantToken = tokenId ? String(tokenId).toUpperCase() : null;
     let cursor = this.getLatestBlock().index;
     while (cursor >= 0 && out.length < limit) {
       const rows = like
@@ -1127,6 +1129,10 @@ class Blockchain {
           const tx = txs[i];
           if (!tx || typeof tx !== 'object') continue;
           if (address && String(tx.sender).toLowerCase() !== address && String(tx.recipient).toLowerCase() !== address) continue;
+          if (wantToken !== null) {
+            const tid = String(tx.token_id || NATIVE_TOKEN).toUpperCase();
+            if (tid !== wantToken) continue;
+          }
           out.push(this.txView(tx, row, i));
         }
         if (out.length >= limit) break;

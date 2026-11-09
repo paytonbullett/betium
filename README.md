@@ -20,24 +20,58 @@ They share the same genesis, block format and database, so nodes of either kind 
 
 ## Get the code
 
-Pick **one** version. Either command creates a folder named `betium` in your current directory.
+Pick **one** version. Either way you end up with a folder named `betium` in your current directory.
+
+### Windows (PowerShell)
+
+**Node.js version**
+```powershell
+git clone --depth 1 https://github.com/paytonbullett/betium.git betium-tmp
+Move-Item betium-tmp\node.js betium
+Remove-Item -Recurse -Force betium-tmp
+cd betium
+node -v    # must print v22.13 or newer
+```
+
+**Python version**
+```powershell
+git clone --depth 1 https://github.com/paytonbullett/betium.git betium-tmp
+Move-Item betium-tmp\python betium
+Remove-Item -Recurse -Force betium-tmp
+cd betium
+python --version    # must be 3.8 or newer
+```
+
+If a `betium` folder already exists, run `Remove-Item -Recurse -Force betium` first. Otherwise `Move-Item` puts the new files inside the old folder.
+
+Then start it by double-clicking `run.bat`, or from PowerShell:
+```powershell
+.\run.bat
+```
+If PowerShell blocks scripts, use this instead:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+
+### Linux / macOS
+
+**Node.js version**
+```bash
+git clone --depth 1 https://github.com/paytonbullett/betium.git betium-tmp
+mv betium-tmp/node.js betium && rm -rf betium-tmp
+cd betium
+node -v    # must print v22.13 or newer
+```
 
 **Python version**
 ```bash
 git clone --depth 1 https://github.com/paytonbullett/betium.git betium-tmp
 mv betium-tmp/python betium && rm -rf betium-tmp
 cd betium
-pip install -r requirements.txt
+python3 --version    # must be 3.8 or newer
 ```
 
-**Node.js version**
-```bash
-git clone --depth 1 https://github.com/paytonbullett/betium.git betium-tmp
-mv betium-tmp/nodejs betium && rm -rf betium-tmp
-cd betium
-node -v    # must print v22.13 or newer
-```
-
+Then start it with `bash run.sh`.
 ---
 
 ## Requirements

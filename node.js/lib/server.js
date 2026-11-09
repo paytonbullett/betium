@@ -128,6 +128,32 @@ function createServer(chain) {
     }];
   });
 
+  // Read-only transaction search (newest first). limit: default 50, max 500.
+  const parseLimit = (query) => {
+    const raw = query.get('limit');
+    if (raw === null) return 50;
+    if (!/^\s*\d+\s*$/.test(raw) || Number(raw) < 1) return null;
+    return Math.min(500, Number(raw));
+  };
+
+  add(['GET'], /^\/transactions\/recent$/, async ({ query }) => {
+    const limit = parseLimit(query);
+    if (limit === null) return [400, { success: false, error: 'limit must be a positive integer' }];
+    const transactions = chain.scanTransactions(limit);
+    return [200, { success: true, count: transactions.length, transactions }];
+  });
+
+  add(['GET'], /^\/address\/([^/]+)\/transactions$/, async ({ m, query }) => {
+    const address = m[1].toLowerCase();
+    if (!eth.validAccountId(address)) {
+      return [400, { success: false, error: 'Address must be a 64-character Betium address or a 0x Ethereum address' }];
+    }
+    const limit = parseLimit(query);
+    if (limit === null) return [400, { success: false, error: 'limit must be a positive integer' }];
+    const transactions = chain.scanTransactions(limit, address);
+    return [200, { success: true, address, count: transactions.length, transactions }];
+  });
+
   add(['GET'], /^\/tokens$/, async () => [200, { tokens: chain.listTokens() }]);
 
   add(['GET'], /^\/token\/([^/]+)$/, async ({ m }) => {

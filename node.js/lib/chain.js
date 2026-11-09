@@ -1051,6 +1051,70 @@ class Blockchain {
     }));
   }
 
+  // ---- read-only transaction search -------------------------------------
+
+  /** One confirmed transaction as returned by the search endpoints. */
+  txView(tx, row, index) {
+    let txHash = null;
+    try {
+      // MetaMask transactions have a real Ethereum hash; native ones use the same
+      // SHA-256 of the canonical JSON that the block's merkle tree is built from.
+      txHash = tx.eth_raw
+        ? eth.decodeRawTx(tx.eth_raw).hash
+        : crypto.createHash('sha256').update(dumps(canonicalTx(tx))).digest('hex');
+    } catch {
+      txHash = null;
+    }
+    const view = {
+      tx_hash: txHash,
+      block_index: row.idx,
+      block_hash: row.hash,
+      tx_index: index,
+      timestamp: row.timestamp,
+      sender: tx.sender,
+      recipient: tx.recipient,
+      amount: parseUnits(tx.amount),
+      fee: parseUnits(tx.fee) || 0,
+      token_id: tx.token_id || NATIVE_TOKEN,
+    };
+    if (tx.action) view.action = tx.action;
+    return view;
+  }
+
+  /**
+   * Read-only. Newest-first confirmed transactions, optionally only those where `address`
+   * (lowercase) is sender or recipient. Walks blocks from the tip down and stops as soon as
+   * `limit` results are found. Never touches state, the mempool or consensus.
+   */
+  scanTransactions(limit, address = null) {
+    const out = [];
+    const like = address ? `%"${address}"%` : null; // cheap pre-filter, exact match below
+    let cursor = this.getLatestBlock().index;
+    while (cursor >= 0 && out.length < limit) {
+      const rows = like
+        ? this.db.all(
+          'SELECT idx, timestamp, hash, transactions FROM blocks WHERE idx <= ? AND transactions LIKE ? ORDER BY idx DESC LIMIT 100',
+          cursor, like,
+        )
+        : this.db.all(
+          'SELECT idx, timestamp, hash, transactions FROM blocks WHERE idx <= ? ORDER BY idx DESC LIMIT 100',
+          cursor,
+        );
+      if (!rows.length) break;
+      for (const row of rows) {
+        const txs = JSON.parse(row.transactions);
+        for (let i = txs.length - 1; i >= 0 && out.length < limit; i--) {
+          const tx = txs[i];
+          if (address && String(tx.sender).toLowerCase() !== address && String(tx.recipient).toLowerCase() !== address) continue;
+          out.push(this.txView(tx, row, i));
+        }
+        if (out.length >= limit) break;
+      }
+      cursor = rows[rows.length - 1].idx - 1;
+    }
+    return out;
+  }
+
   // ---- networking -------------------------------------------------------
 
   async syncFromPeers() {

@@ -1293,6 +1293,77 @@ class Blockchain:
             "protocol_version": PROTOCOL_VERSION,
         }
 
+    # ---- read-only transaction search -------------------------------------
+
+    @staticmethod
+    def _tx_view(tx, block_index, block_hash, timestamp, tx_index):
+        """One confirmed transaction as returned by the search endpoints."""
+        try:
+            if tx.get("eth_raw"):
+                tx_hash = ethcompat.decode_raw_tx(tx["eth_raw"])["hash"]
+            else:
+                # Same SHA-256 of the canonical JSON that the block's merkle tree uses.
+                tx_hash = hashlib.sha256(dumps(canonical_tx(tx)).encode()).hexdigest()
+        except Exception:
+            tx_hash = None
+        view = {
+            "tx_hash": tx_hash,
+            "block_index": block_index,
+            "block_hash": block_hash,
+            "tx_index": tx_index,
+            "timestamp": timestamp,
+            "sender": tx.get("sender"),
+            "recipient": tx.get("recipient"),
+            "amount": parse_units(tx.get("amount")),
+            "fee": parse_units(tx.get("fee")) or 0,
+            "token_id": tx.get("token_id") or NATIVE_TOKEN,
+        }
+        if tx.get("action"):
+            view["action"] = tx["action"]
+        return view
+
+    def scan_transactions(self, limit, address=None):
+        """Read-only. Newest-first confirmed transactions, optionally only those where
+        `address` (lowercase) is sender or recipient. Walks blocks from the tip down and
+        stops as soon as `limit` results are found. Never touches state or the mempool."""
+        out = []
+        like = '%"' + address + '"%' if address else None  # cheap pre-filter, exact match below
+        conn = self.connect()
+        try:
+            cursor = conn.execute("SELECT MAX(idx) FROM blocks").fetchone()[0]
+            while cursor is not None and cursor >= 0 and len(out) < limit:
+                if like:
+                    rows = conn.execute(
+                        "SELECT idx, timestamp, hash, transactions FROM blocks "
+                        "WHERE idx <= ? AND transactions LIKE ? ORDER BY idx DESC LIMIT 100",
+                        (cursor, like),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT idx, timestamp, hash, transactions FROM blocks "
+                        "WHERE idx <= ? ORDER BY idx DESC LIMIT 100",
+                        (cursor,),
+                    ).fetchall()
+                if not rows:
+                    break
+                for idx, ts, bhash, raw in rows:
+                    txs = json.loads(raw)
+                    for i in range(len(txs) - 1, -1, -1):
+                        if len(out) >= limit:
+                            break
+                        tx = txs[i]
+                        if address and address not in (
+                            str(tx.get("sender")).lower(), str(tx.get("recipient")).lower()
+                        ):
+                            continue
+                        out.append(self._tx_view(tx, idx, bhash, ts, i))
+                    if len(out) >= limit:
+                        break
+                cursor = rows[-1][0] - 1
+        finally:
+            conn.close()
+        return out
+
     def headers_from(self, start):
         conn = self.connect()
         rows = conn.execute(
@@ -1589,6 +1660,40 @@ def total_supply():
         "max_supply": units_to_str(MAX_SUPPLY),
         "max_supply_units": MAX_SUPPLY,
     })
+
+
+def _parse_limit():
+    """?limit= for the search endpoints: default 50, max 500, None if invalid."""
+    raw = request.args.get("limit", "50")
+    try:
+        limit = int(raw)
+    except ValueError:
+        return None
+    return None if limit < 1 else min(limit, 500)
+
+
+@app.route("/transactions/recent", methods=["GET"])
+def recent_transactions():
+    limit = _parse_limit()
+    if limit is None:
+        return jsonify({"success": False, "error": "limit must be a positive integer"}), 400
+    txs = blockchain.scan_transactions(limit)
+    return jsonify({"success": True, "count": len(txs), "transactions": txs})
+
+
+@app.route("/address/<address>/transactions", methods=["GET"])
+def address_transactions(address):
+    address = address.lower()
+    if not ethcompat.valid_account_id(address):
+        return jsonify({
+            "success": False,
+            "error": "Address must be a 64-character Betium address or a 0x Ethereum address",
+        }), 400
+    limit = _parse_limit()
+    if limit is None:
+        return jsonify({"success": False, "error": "limit must be a positive integer"}), 400
+    txs = blockchain.scan_transactions(limit, address)
+    return jsonify({"success": True, "address": address, "count": len(txs), "transactions": txs})
 
 
 @app.route("/tokens", methods=["GET"])

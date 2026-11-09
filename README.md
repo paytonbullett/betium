@@ -116,6 +116,51 @@ If your URL is a domain name, `run.sh` offers to set up **nginx or Apache** in f
 
 It then installs the packages, writes the config, gets the certificate, and starts the server. Requirements: root or `sudo`, and a domain whose DNS already points at your server. You can skip it now and run it later with `sudo bash setup-proxy.sh https://your.domain`. On Windows, use a Cloudflare Tunnel or run the Linux version in WSL.
 
+### Windows without a domain (free HTTPS with Cloudflare Tunnel)
+
+Windows has no `screen`, and most home users have no domain or open ports. A **Cloudflare Tunnel** solves that: Cloudflare gives your node a public `https://` address and forwards traffic to your PC. You don't need a domain certificate, a web server, or router port forwarding, and your home IP stays hidden.
+
+**1. Install the tunnel program** (PowerShell):
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+Close and reopen PowerShell afterwards.
+
+**2a. Quick test address (no account, no domain)**
+
+In one PowerShell window:
+```powershell
+cloudflared tunnel --url http://localhost:5000
+```
+It prints an address like `https://random-words.trycloudflare.com`. Leave this window open. In a second window, run `.\run.bat` and enter that address as your node URL.
+
+The address changes every time you restart the tunnel, so use this for testing. It has no uptime guarantee.
+
+**2b. Permanent address (free tunnel, needs a domain on Cloudflare)**
+
+You need a domain in a free Cloudflare account. It can be your own, or a subdomain the project owner delegates to you.
+
+1. In the Cloudflare dashboard, go to Zero Trust > Networks > Tunnels (menu names change from time to time) and create a tunnel.
+2. Choose Windows, then copy and run the install command it shows in an **Administrator** PowerShell. This installs the tunnel as a Windows service, so it starts with the PC and needs no open window.
+3. Add a public hostname, for example `mynode.example.com`, with service type `HTTP` and URL `localhost:5000`.
+4. Run `.\run.bat` and enter `https://mynode.example.com` as your node URL.
+
+**SSL / HTTPS:** with a tunnel, Cloudflare provides the certificate and encrypts the connection. There is nothing to install or renew on your PC, and you can skip the Linux web server setup. MetaMask uses `https://your-address/rpc` with chain ID `947263` and symbol `BETM`.
+
+**Staying safe**
+- Use a tunnel instead of forwarding a port on your router. Forwarding exposes your home IP address.
+- Answer **N** when the launcher asks to open the Windows Firewall port. A tunnel doesn't need it.
+- Node.js version only: keep the node reachable from your own PC only with `$env:HOST = "127.0.0.1"` before running `.\run.bat`.
+- Keep `wallet.json` private and back it up. It holds your private key. Never upload or commit it.
+
+**Checking that your node is running**
+
+The node runs in the window you started it from. If you close that window, press Ctrl-C, or the PC sleeps or shuts down, it stops. Turn off sleep in Windows Power settings. To check it, open another PowerShell window:
+```powershell
+Invoke-RestMethod http://127.0.0.1:5000/chain/status
+```
+It prints the chain height when the node is up and shows an error when it's not.
+
 ### Notes
 
 - Your URL must be public. A `localhost` or `192.168.x.x` address still syncs the chain, but other nodes can't find it.

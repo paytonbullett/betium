@@ -1053,7 +1053,11 @@ class Blockchain {
 
   // ---- read-only transaction search -------------------------------------
 
-  /** One confirmed transaction as returned by the search endpoints. */
+  /**
+   * One confirmed transaction as returned by the search endpoints.
+   * Emits both NETWORK coinbase rewards and every user-to-user (P2P)
+   * transfer / create_token / eth_raw transaction included in the block.
+   */
   txView(tx, row, index) {
     let txHash = null;
     try {
@@ -1065,19 +1069,26 @@ class Blockchain {
     } catch {
       txHash = null;
     }
+    const sender = tx.sender;
+    const action = tx.action;
+    let txType;
+    if (sender === 'NETWORK') txType = 'reward';
+    else if (action) txType = action;
+    else txType = 'transfer';
     const view = {
       tx_hash: txHash,
       block_index: row.idx,
       block_hash: row.hash,
       tx_index: index,
       timestamp: row.timestamp,
-      sender: tx.sender,
+      sender,
       recipient: tx.recipient,
       amount: parseUnits(tx.amount),
       fee: parseUnits(tx.fee) || 0,
       token_id: tx.token_id || NATIVE_TOKEN,
+      type: txType,
     };
-    if (tx.action) view.action = tx.action;
+    if (action) view.action = action;
     return view;
   }
 
@@ -1085,6 +1096,7 @@ class Blockchain {
    * Read-only. Newest-first confirmed transactions, optionally only those where `address`
    * (lowercase) is sender or recipient. Walks blocks from the tip down and stops as soon as
    * `limit` results are found. Never touches state, the mempool or consensus.
+   * Flattens every transaction in each block (rewards + P2P transfers).
    */
   scanTransactions(limit, address = null) {
     const out = [];
@@ -1102,9 +1114,18 @@ class Blockchain {
         );
       if (!rows.length) break;
       for (const row of rows) {
-        const txs = JSON.parse(row.transactions);
+        let txs;
+        try {
+          txs = JSON.parse(row.transactions);
+        } catch {
+          continue;
+        }
+        if (!Array.isArray(txs)) continue;
+        // Newest-first inside the block so P2P transfers that sit before the
+        // coinbase reward still appear in chronological order.
         for (let i = txs.length - 1; i >= 0 && out.length < limit; i--) {
           const tx = txs[i];
+          if (!tx || typeof tx !== 'object') continue;
           if (address && String(tx.sender).toLowerCase() !== address && String(tx.recipient).toLowerCase() !== address) continue;
           out.push(this.txView(tx, row, i));
         }

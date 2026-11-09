@@ -154,6 +154,17 @@ function createServer(chain) {
     return [200, { success: true, address, count: transactions.length, transactions }];
   });
 
+  // Newest-first confirmed transactions for a specific token (BETM or sub-token).
+  add(['GET'], /^\/token\/([^/]+)\/transactions$/, async ({ m, query }) => {
+    const tokenId = (m[1] || '').trim();
+    if (!tokenId) return [400, { success: false, error: 'token_id required' }];
+    const limit = parseLimit(query);
+    if (limit === null) return [400, { success: false, error: 'limit must be a positive integer' }];
+    const transactions = chain.scanTransactions(limit, null, tokenId);
+    const displayId = tokenId.toUpperCase() === NATIVE_TOKEN ? NATIVE_TOKEN : tokenId;
+    return [200, { success: true, token_id: displayId, count: transactions.length, transactions }];
+  });
+
   add(['GET'], /^\/tokens$/, async () => [200, { tokens: chain.listTokens() }]);
 
   add(['GET'], /^\/token\/([^/]+)$/, async ({ m }) => {

@@ -1094,12 +1094,18 @@ class Blockchain {
   }
 
   /**
-   * Read-only. Newest-first confirmed transactions, optionally filtered by
-   * `address` (lowercase sender/recipient) and/or `tokenId`. Walks blocks from
-   * the tip down and stops as soon as `limit` results are found. Never touches
-   * state, the mempool or consensus. Flattens every transaction in each block.
+   * Read-only. Newest-first confirmed transactions.
+   *
+   * Filters (all optional):
+   *   address         – lowercase sender or recipient match
+   *   tokenId         – only this token (BETM or sub-token)
+   *   onlyRewards     – only NETWORK coinbase rewards
+   *   excludeRewards  – drop NETWORK rewards (P2P / token activity only)
+   *
+   * Walks blocks from the tip down and stops as soon as `limit` results are
+   * found. Never touches state, the mempool or consensus.
    */
-  scanTransactions(limit, address = null, tokenId = null) {
+  scanTransactions(limit, address = null, tokenId = null, onlyRewards = false, excludeRewards = false) {
     const out = [];
     const like = address ? `%"${address}"%` : null; // cheap pre-filter, exact match below
     const wantToken = tokenId ? String(tokenId).toUpperCase() : null;
@@ -1128,6 +1134,9 @@ class Blockchain {
         for (let i = txs.length - 1; i >= 0 && out.length < limit; i--) {
           const tx = txs[i];
           if (!tx || typeof tx !== 'object') continue;
+          const isReward = tx.sender === 'NETWORK';
+          if (onlyRewards && !isReward) continue;
+          if (excludeRewards && isReward) continue;
           if (address && String(tx.sender).toLowerCase() !== address && String(tx.recipient).toLowerCase() !== address) continue;
           if (wantToken !== null) {
             const tid = String(tx.token_id || NATIVE_TOKEN).toUpperCase();

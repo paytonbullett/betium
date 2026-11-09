@@ -1315,6 +1315,8 @@ class Blockchain:
         action = tx.get("action")
         if sender == "NETWORK":
             tx_type = "reward"
+        elif action == "create_token":
+            tx_type = "token_create"
         elif action:
             tx_type = action
         else:
@@ -1330,18 +1332,20 @@ class Blockchain:
             "amount": parse_units(tx.get("amount")),
             "fee": parse_units(tx.get("fee")) or 0,
             "token_id": tx.get("token_id") or NATIVE_TOKEN,
-            "type": tx_type,
+            "tx_type": tx_type,
         }
         if action:
             view["action"] = action
         return view
 
-    def scan_transactions(self, limit, address=None):
-        """Read-only. Newest-first confirmed transactions, optionally only those where
-        `address` (lowercase) is sender or recipient. Walks blocks from the tip down and
-        stops as soon as `limit` results are found. Never touches state or the mempool."""
+    def scan_transactions(self, limit, address=None, token_id=None):
+        """Read-only. Newest-first confirmed transactions, optionally filtered by
+        `address` (lowercase sender/recipient) and/or `token_id`. Walks blocks from
+        the tip down and stops as soon as `limit` results are found. Never touches
+        state or the mempool."""
         out = []
         like = '%"' + address + '"%' if address else None  # cheap pre-filter, exact match below
+        want_token = token_id.upper() if token_id else None
         conn = self.connect()
         try:
             cursor = conn.execute("SELECT MAX(idx) FROM blocks").fetchone()[0]
@@ -1379,6 +1383,10 @@ class Blockchain:
                             str(tx.get("sender")).lower(), str(tx.get("recipient")).lower()
                         ):
                             continue
+                        if want_token is not None:
+                            tid = (tx.get("token_id") or NATIVE_TOKEN).upper()
+                            if tid != want_token:
+                                continue
                         out.append(self._tx_view(tx, idx, bhash, ts, i))
                     if len(out) >= limit:
                         break
@@ -1717,6 +1725,24 @@ def address_transactions(address):
         return jsonify({"success": False, "error": "limit must be a positive integer"}), 400
     txs = blockchain.scan_transactions(limit, address)
     return jsonify({"success": True, "address": address, "count": len(txs), "transactions": txs})
+
+
+@app.route("/token/<token_id>/transactions", methods=["GET"])
+def token_transactions(token_id):
+    """Newest-first confirmed transactions for a specific token (BETM or sub-token)."""
+    token_id = (token_id or "").strip()
+    if not token_id:
+        return jsonify({"success": False, "error": "token_id required"}), 400
+    limit = _parse_limit()
+    if limit is None:
+        return jsonify({"success": False, "error": "limit must be a positive integer"}), 400
+    txs = blockchain.scan_transactions(limit, token_id=token_id)
+    return jsonify({
+        "success": True,
+        "token_id": token_id.upper() if token_id.upper() == NATIVE_TOKEN else token_id,
+        "count": len(txs),
+        "transactions": txs,
+    })
 
 
 @app.route("/tokens", methods=["GET"])

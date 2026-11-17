@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Betium Explorer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        betium: { 50:'#f0fdf6', 100:'#dcfce9', 500:'#10b981', 600:'#059669', 700:'#047857', 900:'#064e3b', 950:'#022c22' }
+      }
+    }
+  }
+}
+</script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85rem; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 0.75rem; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .truncate-hash { max-width: 12rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (min-width: 768px) { .truncate-hash { max-width: 18rem; } }
+  pre.json { white-space: pre-wrap; word-break: break-all; max-height: 60vh; overflow: auto; }
+  .modal-bg { background: rgba(15,23,42,.55); }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+<header class="bg-betium-900 text-white">
+  <div class="max-w-6xl mx-auto px-4 py-4 flex flex-wrap items-center justify-between gap-3">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-lg bg-betium-500 flex items-center justify-center font-bold text-lg">B</div>
+      <div>
+        <div class="font-semibold text-lg leading-tight">Betium Explorer</div>
+        <div class="text-betium-100 text-xs opacity-80">Lightweight chain dashboard</div>
+      </div>
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <span id="syncBadge" class="px-2 py-1 rounded-full bg-white/10">…</span>
+      <a href="/network" class="px-2 py-1 rounded bg-white/10 hover:bg-white/20">/network</a>
+      <a href="/chain/status" class="px-2 py-1 rounded bg-white/10 hover:bg-white/20">API</a>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+  <!-- Stats -->
+  <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">Height</div>
+      <div id="statHeight" class="text-2xl font-semibold mt-1 mono">—</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">Circulating</div>
+      <div id="statSupply" class="text-2xl font-semibold mt-1 mono">—</div>
+      <div class="text-xs text-slate-400 mt-1">BETM</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">Tip</div>
+      <div id="statTip" class="text-sm font-medium mt-2 mono break-all">—</div>
+    </div>
+    <div class="card p-4">
+      <div class="text-xs text-slate-500 uppercase tracking-wide">Sync / Work</div>
+      <div id="statSync" class="text-lg font-semibold mt-1">—</div>
+      <div id="statWork" class="text-xs text-slate-400 mt-1 mono break-all">—</div>
+    </div>
+  </section>
+
+  <!-- Search -->
+  <section class="card p-4">
+    <form id="searchForm" class="flex flex-col sm:flex-row gap-2">
+      <input id="searchInput" type="search" placeholder="Block height, block hash, tx hash, or address…"
+        class="flex-1 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-betium-500"
+        autocomplete="off"/>
+      <button type="submit" class="bg-betium-600 hover:bg-betium-700 text-white px-5 py-2 rounded-lg font-medium">Search</button>
+    </form>
+    <p id="searchHint" class="text-xs text-slate-400 mt-2">Examples: <code>42</code>, a 64-char block hash, <code>0x</code> tx hash, or wallet address</p>
+    <div id="searchError" class="hidden mt-3 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2"></div>
+  </section>
+
+  <!-- Recent blocks -->
+  <section class="card overflow-hidden">
+    <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+      <h2 class="font-semibold">Recent blocks</h2>
+      <button id="refreshBtn" class="text-sm text-betium-700 hover:underline">Refresh</button>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="bg-slate-50 text-left text-xs uppercase text-slate-500">
+          <tr>
+            <th class="px-4 py-2">Height</th>
+            <th class="px-4 py-2">Hash</th>
+            <th class="px-4 py-2 hidden md:table-cell">Time</th>
+            <th class="px-4 py-2">Txs</th>
+            <th class="px-4 py-2 hidden sm:table-cell">Difficulty</th>
+          </tr>
+        </thead>
+        <tbody id="blocksBody" class="divide-y divide-slate-100">
+          <tr><td colspan="5" class="px-4 py-6 text-center text-slate-400">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="text-center text-xs text-slate-400 pb-8">
+    Betium node explorer · data from this node’s REST &amp; JSON-RPC APIs · no external indexer
+  </footer>
+</main>
+
+<!-- Modal -->
+<div id="modal" class="fixed inset-0 z-50 hidden items-center justify-center p-4 modal-bg">
+  <div class="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col">
+    <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
+      <h3 id="modalTitle" class="font-semibold truncate">Details</h3>
+      <button id="modalClose" class="text-slate-500 hover:text-slate-800 text-xl leading-none px-2">&times;</button>
+    </div>
+    <div id="modalBody" class="p-4 overflow-y-auto text-sm space-y-3"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function fmtTime(ts) {
+  if (ts == null) return '—';
+  try { return new Date(Number(ts) * 1000).toLocaleString(); } catch { return String(ts); }
+}
+function shortHash(h) {
+  if (!h) return '—';
+  const s = String(h);
+  if (s.length <= 18) return s;
+  return s.slice(0, 10) + '…' + s.slice(-8);
+}
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showError(msg) {
+  const el = $('searchError');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+function clearError() { $('searchError').classList.add('hidden'); }
+
+function openModal(title, html) {
+  $('modalTitle').textContent = title;
+  $('modalBody').innerHTML = html;
+  $('modal').classList.remove('hidden');
+  $('modal').classList.add('flex');
+}
+function closeModal() {
+  $('modal').classList.add('hidden');
+  $('modal').classList.remove('flex');
+}
+$('modalClose').onclick = closeModal;
+$('modal').addEventListener('click', (e) => { if (e.target === $('modal')) closeModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) {
+    const err = (data && data.error) || res.statusText || 'Request failed';
+    throw new Error(typeof err === 'string' ? err : JSON.stringify(err));
+  }
+  return data;
+}
+
+async function rpc(method, params) {
+  const body = await api('/rpc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: params || [] })
+  });
+  if (body.error) throw new Error(body.error.message || JSON.stringify(body.error));
+  return body.result;
+}
+
+function kvTable(rows) {
+  return `<div class="overflow-x-auto"><table class="w-full text-sm">
+    ${rows.map(([k,v]) => `<tr class="border-b border-slate-50">
+      <td class="py-1.5 pr-3 text-slate-500 whitespace-nowrap align-top">${esc(k)}</td>
+      <td class="py-1.5 mono break-all">${v}</td></tr>`).join('')}
+  </table></div>`;
+}
+
+function jsonBlock(obj) {
+  return `<pre class="json bg-slate-50 border border-slate-100 rounded-lg p-3 mono text-xs">${esc(JSON.stringify(obj, null, 2))}</pre>`;
+}
+
+function renderTxList(txs) {
+  if (!txs || !txs.length) return '<p class="text-slate-400 text-sm">No transactions</p>';
+  return `<div class="space-y-2">${txs.map((tx, i) => {
+    const sender = tx.sender || tx.from || '—';
+    const recipient = tx.recipient || tx.to || '—';
+    const amount = tx.amount != null ? tx.amount : (tx.value != null ? tx.value : '—');
+    const fee = tx.fee != null ? tx.fee : '—';
+    const hash = tx.tx_hash || tx.hash || '';
+    return `<div class="border border-slate-100 rounded-lg p-3 hover:bg-slate-50 cursor-pointer" data-tx-idx="${i}">
+      <div class="flex flex-wrap gap-2 text-xs text-slate-500 mb-1">
+        <span class="font-medium text-slate-700">#${tx.tx_index != null ? tx.tx_index : i}</span>
+        <span>${esc(tx.tx_type || 'tx')}</span>
+        ${hash ? `<span class="mono truncate-hash">${esc(shortHash(hash))}</span>` : ''}
+      </div>
+      <div class="mono text-xs break-all"><span class="text-slate-400">from</span> ${esc(sender)}</div>
+      <div class="mono text-xs break-all"><span class="text-slate-400">to</span> ${esc(recipient)}</div>
+      <div class="text-xs mt-1">amount: <span class="mono">${esc(amount)}</span> · fee: <span class="mono">${esc(fee)}</span>
+        ${tx.token_id ? ` · token: ${esc(tx.token_id)}` : ''}</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function showBlock(block) {
+  if (!block) return;
+  const b = block.block || block;
+  const minerTx = (b.transactions || []).find(t => t && t.sender === 'NETWORK');
+  const miner = minerTx ? minerTx.recipient : '—';
+  const rows = [
+    ['Index', esc(b.index)],
+    ['Hash', `<span class="mono break-all">${esc(b.hash)}</span>`],
+    ['Previous', `<span class="mono break-all">${esc(b.previous_hash)}</span>`],
+    ['Timestamp', esc(fmtTime(b.timestamp)) + ` <span class="text-slate-400">(${esc(b.timestamp)})</span>`],
+    ['Merkle root', `<span class="mono break-all">${esc(b.merkle_root)}</span>`],
+    ['Difficulty', esc(b.difficulty)],
+    ['Nonce', esc(b.nonce)],
+    ['Protocol', esc(b.protocol_version)],
+    ['Miner (coinbase)', `<span class="mono break-all">${esc(miner)}</span>`],
+    ['Tx count', esc((b.transactions || []).length)],
+  ];
+  const html = kvTable(rows)
+    + `<h4 class="font-medium mt-4 mb-2">Transactions</h4>`
+    + renderTxList(b.transactions)
+    + `<h4 class="font-medium mt-4 mb-2">Raw JSON</h4>`
+    + jsonBlock(b);
+  openModal(`Block #${b.index}`, html);
+  // Attach click handlers for nested tx detail
+  $('modalBody').querySelectorAll('[data-tx-idx]').forEach(el => {
+    el.addEventListener('click', () => {
+      const tx = b.transactions[Number(el.getAttribute('data-tx-idx'))];
+      showTx(tx, b);
+    });
+  });
+}
+
+function showTx(tx, block) {
+  if (!tx) return;
+  const rows = [
+    ['Type', esc(tx.tx_type || tx.action || (tx.sender === 'NETWORK' ? 'reward' : 'transfer'))],
+    ['Hash', `<span class="mono break-all">${esc(tx.tx_hash || tx.hash || '—')}</span>`],
+    ['Block', esc(tx.block_index != null ? tx.block_index : (block && block.index))],
+    ['Block hash', `<span class="mono break-all">${esc(tx.block_hash || (block && block.hash) || '—')}</span>`],
+    ['Index in block', esc(tx.tx_index != null ? tx.tx_index : '—')],
+    ['Timestamp', esc(fmtTime(tx.timestamp != null ? tx.timestamp : (block && block.timestamp)))],
+    ['Sender', `<span class="mono break-all">${esc(tx.sender || tx.from || '—')}</span>`],
+    ['Recipient', `<span class="mono break-all">${esc(tx.recipient || tx.to || '—')}</span>`],
+    ['Amount', esc(tx.amount != null ? tx.amount : tx.value)],
+    ['Fee', esc(tx.fee != null ? tx.fee : '—')],
+    ['Token', esc(tx.token_id || 'BETM')],
+    ['Nonce', esc(tx.nonce != null ? tx.nonce : '—')],
+  ];
+  if (tx.eth_raw) rows.push(['eth_raw', `<span class="mono break-all">${esc(tx.eth_raw)}</span>`]);
+  openModal('Transaction', kvTable(rows) + `<h4 class="font-medium mt-4 mb-2">Raw JSON</h4>` + jsonBlock(tx));
+}
+
+function showAccount(addr, bal, txs) {
+  const rows = [
+    ['Address', `<span class="mono break-all">${esc(addr)}</span>`],
+    ['Token', esc(bal.token_id || 'BETM')],
+    ['Balance', esc(bal.balance) + (bal.balance_units != null ? ` <span class="text-slate-400">(${esc(bal.balance_units)} units)</span>` : '')],
+    ['Nonce', esc(bal.nonce)],
+  ];
+  let html = kvTable(rows);
+  if (txs && txs.transactions) {
+    html += `<h4 class="font-medium mt-4 mb-2">Recent activity (${txs.count})</h4>` + renderTxList(txs.transactions);
+  }
+  html += `<h4 class="font-medium mt-4 mb-2">Raw JSON</h4>` + jsonBlock({ balance: bal, transactions: txs });
+  openModal('Address', html);
+  $('modalBody').querySelectorAll('[data-tx-idx]').forEach(el => {
+    el.addEventListener('click', () => {
+      const tx = txs.transactions[Number(el.getAttribute('data-tx-idx'))];
+      showTx(tx);
+    });
+  });
+}
+
+async function loadStats() {
+  try {
+    const [status, supply] = await Promise.all([
+      api('/chain/status'),
+      api('/supply')
+    ]);
+    $('statHeight').textContent = status.height != null ? status.height : '—';
+    $('statTip').textContent = status.tip || '—';
+    $('statWork').textContent = 'work ' + (status.work != null ? status.work : '—');
+    $('statSupply').textContent = supply.total_circulating_supply != null
+      ? supply.total_circulating_supply
+      : '—';
+    let syncLabel = 'Live';
+    let badge = 'Synced';
+    if (status.synced === false) {
+      syncLabel = 'Syncing';
+      badge = 'Syncing';
+      if (status.target_height != null) syncLabel += ` → ${status.target_height}`;
+      if (status.gap_count) syncLabel += ` (${status.gap_count} gaps)`;
+    } else if (status.synced === true) {
+      syncLabel = 'Synced';
+      badge = 'Synced';
+    }
+    $('statSync').textContent = syncLabel;
+    const sb = $('syncBadge');
+    sb.textContent = badge;
+    sb.className = 'px-2 py-1 rounded-full text-xs ' +
+      (badge === 'Synced' ? 'bg-emerald-500/30' : 'bg-amber-400/30');
+  } catch (e) {
+    $('statSync').textContent = 'Offline';
+    $('syncBadge').textContent = 'Error';
+  }
+}
+
+async function loadRecentBlocks() {
+  const tbody = $('blocksBody');
+  try {
+    const status = await api('/chain/status');
+    const height = Number(status.height || 0);
+    const from = Math.max(0, height - 14);
+    const count = height - from + 1;
+    const blocks = [];
+    // Fetch in parallel, newest first display
+    const idxs = [];
+    for (let i = height; i >= from; i--) idxs.push(i);
+    const results = await Promise.all(idxs.map(i =>
+      api('/block/' + i).then(d => d.block || d).catch(() => null)
+    ));
+    for (const b of results) if (b) blocks.push(b);
+    if (!blocks.length) {
+      tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-slate-400">No blocks</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = blocks.map(b => `<tr class="hover:bg-betium-50/50 cursor-pointer" data-index="${b.index}">
+      <td class="px-4 py-2 font-medium mono">${esc(b.index)}</td>
+      <td class="px-4 py-2 mono text-betium-700"><span class="truncate-hash inline-block align-bottom" title="${esc(b.hash)}">${esc(shortHash(b.hash))}</span></td>
+      <td class="px-4 py-2 hidden md:table-cell text-slate-500">${esc(fmtTime(b.timestamp))}</td>
+      <td class="px-4 py-2">${esc((b.transactions || []).length)}</td>
+      <td class="px-4 py-2 hidden sm:table-cell mono">${esc(b.difficulty)}</td>
+    </tr>`).join('');
+    tbody.querySelectorAll('tr[data-index]').forEach(tr => {
+      tr.addEventListener('click', async () => {
+        try {
+          const data = await api('/block/' + tr.getAttribute('data-index'));
+          showBlock(data);
+        } catch (e) { showError(e.message); }
+      });
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-red-500">${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function doSearch(q) {
+  clearError();
+  q = (q || '').trim();
+  if (!q) return;
+  // Block height
+  if (/^\d+$/.test(q)) {
+    try {
+      const data = await api('/block/' + q);
+      showBlock(data);
+      return;
+    } catch (e) {
+      showError('Block not found: ' + e.message);
+      return;
+    }
+  }
+  // Tx hash 0x...
+  if (/^0x[0-9a-fA-F]{64}$/.test(q)) {
+    try {
+      const tx = await rpc('eth_getTransactionByHash', [q.toLowerCase()]);
+      if (tx) {
+        showTx({
+          hash: tx.hash,
+          sender: tx.from,
+          recipient: tx.to,
+          amount: tx.value,
+          fee: null,
+          nonce: tx.nonce,
+          block_hash: tx.blockHash,
+          block_index: tx.blockNumber ? parseInt(tx.blockNumber, 16) : null,
+          eth_raw: null,
+          tx_type: 'eth'
+        });
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    try {
+      const blk = await rpc('eth_getBlockByHash', [q.toLowerCase(), true]);
+      if (blk) {
+        // Map eth block to native-ish view when possible
+        openModal('Block (RPC)', jsonBlock(blk));
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    showError('No transaction or block found for ' + q);
+    return;
+  }
+  // Native 64-hex: try as block hash first, then as native address
+  if (/^[0-9a-fA-F]{64}$/.test(q)) {
+    try {
+      const blk = await rpc('eth_getBlockByHash', ['0x' + q.toLowerCase(), false]);
+      if (blk && blk.number != null) {
+        const idx = parseInt(blk.number, 16);
+        const data = await api('/block/' + idx);
+        showBlock(data);
+        return;
+      }
+    } catch (e) { /* fall through to address */ }
+    try {
+      const bal = await api('/balance/' + encodeURIComponent(q));
+      let txs = null;
+      try { txs = await api('/address/' + encodeURIComponent(q) + '/transactions?limit=25'); } catch (_) {}
+      showAccount(q, bal, txs);
+      return;
+    } catch (e) {
+      showError('No block or address found for this 64-char value.');
+      return;
+    }
+  }
+  // Address: 0x40 hex or 0x64 hex
+  if (/^0x[0-9a-fA-F]{40}$/.test(q) || /^0x[0-9a-fA-F]{64}$/.test(q)) {
+    const addr = q;
+    try {
+      const bal = await api('/balance/' + encodeURIComponent(addr));
+      let txs = null;
+      try {
+        txs = await api('/address/' + encodeURIComponent(addr) + '/transactions?limit=25');
+      } catch (_) {}
+      showAccount(addr, bal, txs);
+      return;
+    } catch (e) {
+      showError('Address lookup failed: ' + e.message);
+      return;
+    }
+  }
+  showError('Unrecognized query. Enter a height, 64-char hash, 0x tx hash, or address.');
+}
+
+$('searchForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  doSearch($('searchInput').value);
+});
+$('refreshBtn').addEventListener('click', () => {
+  loadStats();
+  loadRecentBlocks();
+});
+
+loadStats();
+loadRecentBlocks();
+setInterval(() => { loadStats(); loadRecentBlocks(); }, 20000);
+</script>
+</body>
+</html>

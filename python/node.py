@@ -62,7 +62,7 @@ from urllib.parse import urlparse
 
 import requests
 from ecdsa import VerifyingKey, SECP256k1
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file, Response
 
 import ethcompat
 from consensus import (
@@ -122,16 +122,6 @@ class Blockchain:
         self._peer_lock = threading.Lock()
         self._chain_lock = threading.RLock()
         self.db_file = DB_FILE
-        # Sync observability & peer hygiene
-        self._banned_peers = set()          # wrong genesis / invalid data
-        self._peer_fail_counts = {}         # consecutive failures
-        self._selected_peers = []           # last chosen high-work peers
-        self._target_height = 0
-        self._target_work = 0
-        self._sync_gaps = []                # missing indices currently known
-        self._synced = False
-        self._last_sync_progress = 0.0
-        self._sync_in_progress = False
         self.init_db()
 
     def connect(self):
@@ -1295,31 +1285,12 @@ class Blockchain:
 
     def status(self):
         tip = self.get_latest_block()
-        height = tip["index"] if tip else 0
-        gaps = self.find_gaps()
-        contiguous = self.contiguous_height()
-        synced = (
-            self._synced
-            and not gaps
-            and height >= self._target_height
-            and self._target_height > 0
-        ) if self._target_height else (not gaps and contiguous == height)
         return {
             "genesis": GENESIS_HASH,
-            "height": height,
-            "tip": tip["hash"] if tip else None,
+            "height": tip["index"],
+            "tip": tip["hash"],
             "work": str(self.chain_work()),
             "protocol_version": PROTOCOL_VERSION,
-            "target_height": self._target_height,
-            "target_work": str(self._target_work),
-            "contiguous_height": contiguous,
-            "gaps": gaps[:50],
-            "gap_count": len(gaps),
-            "selected_peers": list(self._selected_peers)[:10],
-            "peer_count": len(self.peers),
-            "banned_peers": len(self._banned_peers),
-            "synced": bool(synced),
-            "sync_in_progress": self._sync_in_progress,
         }
 
     # ---- read-only transaction search -------------------------------------
@@ -1451,366 +1422,57 @@ class Blockchain:
             for r in rows
         ]
 
-    def contiguous_height(self, conn=None):
-        """Highest index such that every index from 0..h is present with linked previous_hash."""
-        own = conn is None
-        if own:
-            conn = self.connect()
-        try:
-            rows = conn.execute("SELECT idx, hash, previous_hash FROM blocks ORDER BY idx").fetchall()
-            if not rows:
-                return -1
-            expected = 0
-            prev_hash = None
-            for idx, h, prev in rows:
-                if idx != expected:
-                    return expected - 1
-                if expected == 0:
-                    if h != GENESIS_HASH:
-                        return -1
-                else:
-                    if prev != prev_hash:
-                        return expected - 1
-                prev_hash = h
-                expected += 1
-            return expected - 1
-        finally:
-            if own:
-                conn.close()
-
-    def find_gaps(self, up_to=None):
-        """Return sorted list of missing block indices between 0 and max present (or up_to)."""
-        conn = self.connect()
-        try:
-            rows = conn.execute("SELECT idx FROM blocks ORDER BY idx").fetchall()
-            present = {r[0] for r in rows}
-            if not present:
-                return []
-            hi = max(present) if up_to is None else min(max(present), int(up_to))
-            return [i for i in range(0, hi + 1) if i not in present]
-        finally:
-            conn.close()
-
-    def _ban_peer(self, peer, reason):
-        if not peer:
-            return
-        with self._peer_lock:
-            self._banned_peers.add(peer)
-            self.peers.discard(peer)
-            self.save_peers()
-        print(f"[!] Banned peer {peer}: {reason}")
-
-    def _note_peer_fail(self, peer):
-        if not peer:
-            return
-        with self._peer_lock:
-            c = self._peer_fail_counts.get(peer, 0) + 1
-            self._peer_fail_counts[peer] = c
-            if c >= 5:
-                self._banned_peers.add(peer)
-                self.peers.discard(peer)
-                self.save_peers()
-                print(f"[!] Dropping unresponsive peer {peer} after {c} failures")
-
-    def _note_peer_ok(self, peer):
-        if peer in self._peer_fail_counts:
-            self._peer_fail_counts[peer] = 0
-
-    def _query_peer_status(self, peer, timeout=4):
-        try:
-            res = requests.get(f"{peer}/chain/status", timeout=timeout)
-            if res.status_code != 200:
-                self._note_peer_fail(peer)
-                return None
-            data = res.json()
-            if data.get("genesis") != GENESIS_HASH:
-                self._ban_peer(peer, "genesis mismatch")
-                return None
-            self._note_peer_ok(peer)
-            return data
-        except Exception:
-            self._note_peer_fail(peer)
-            return None
-
-    def _select_best_peers(self, need=3):
-        """Query peers for /chain/status and return those with the highest valid work."""
-        candidates = []
-        for peer in list(self.peers):
-            if peer == self.my_node_url or peer in self._banned_peers:
-                continue
-            st = self._query_peer_status(peer)
-            if not st:
-                continue
-            try:
-                work = int(st.get("work", "0"))
-                height = int(st.get("height", 0))
-            except (TypeError, ValueError):
-                continue
-            candidates.append((work, height, peer, st))
-        candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        self._selected_peers = [c[2] for c in candidates[:need]]
-        if candidates:
-            self._target_work = candidates[0][0]
-            self._target_height = candidates[0][1]
-        return candidates[:need]
-
-    def _download_headers(self, peer, from_idx=0, timeout=15):
-        try:
-            res = requests.get(f"{peer}/headers?from={from_idx}", timeout=timeout)
-            if res.status_code != 200:
-                return None
-            headers = res.json().get("headers", [])
-            if not headers:
-                return []
-            verified = []
-            prev = None
-            for h in headers:
-                if not isinstance(h, dict):
-                    return None
-                idx = h.get("index")
-                hh = h.get("hash")
-                ph = h.get("previous_hash")
-                if idx is None or not hh or ph is None:
-                    return None
-                if prev is not None:
-                    if idx != prev["index"] + 1 or ph != prev["hash"]:
-                        print(f"[!] Header chain break from {peer} at index {idx}")
-                        return None
-                prev = h
-                verified.append(h)
-            return verified
-        except Exception as e:
-            print(f"[!] Header download failed from {peer}: {e}")
-            self._note_peer_fail(peer)
-            return None
-
-    def _fetch_block_body(self, peer, index, expected_hash=None, timeout=8):
-        try:
-            res = requests.get(f"{peer}/block/{index}", timeout=timeout)
-            if res.status_code != 200:
-                return None
-            block = res.json().get("block")
-            if not block or not isinstance(block, dict):
-                return None
-            if expected_hash and block.get("hash") != expected_hash:
-                return None
-            if block.get("index") != index:
-                return None
-            return block
-        except Exception:
-            return None
-
-    def _find_common_ancestor(self, headers):
-        """Return highest local index that matches the header chain (or -1)."""
-        common = -1
-        for h in headers:
-            local = self.get_block_by_index(h["index"])
-            if local and local["hash"] == h["hash"]:
-                common = h["index"]
-            else:
-                break
-        return common
-
     def sync_from_peers(self):
-        """Full catch-up: select best-work peers, header-first, fill every gap, parallel bodies."""
-        if self._sync_in_progress:
-            return
-        self._sync_in_progress = True
-        try:
-            best = self._select_best_peers(need=5)
-            if not best:
-                self._fill_local_gaps()
-                return
-
-            local_work = self.chain_work()
-            best_work, best_height, best_peer, _ = best[0]
-            if best_work <= local_work and not self.find_gaps():
-                self._synced = True
-                self._target_height = best_height
-                self._target_work = best_work
-                return
-
-            peer_list = [c[2] for c in best]
-            headers = None
-            source = None
-            for peer in peer_list:
-                headers = self._download_headers(peer, from_idx=0)
-                if headers is not None and headers and headers[0].get("hash") == GENESIS_HASH:
-                    source = peer
-                    break
-            if not headers:
-                print("[!] Could not obtain a valid header chain from any peer")
-                return
-
-            if headers[0].get("hash") != GENESIS_HASH or headers[0].get("index") != 0:
-                self._ban_peer(source, "headers do not start at genesis")
-                return
-
-            common = self._find_common_ancestor(headers)
-            tip_header = headers[-1]
-            self._target_height = tip_header["index"]
-            print(f"[*] Syncing from {source}: common={common} target={self._target_height} (local work={local_work} remote work={best_work})")
-
-            needed = [h for h in headers if h["index"] > common]
-            if not needed and not self.find_gaps():
-                self._synced = True
-                return
-
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            BATCH = 32
-            MAX_WORKERS = 12
-            blocks_to_adopt = []
-            pointer = 0
-            stall_rounds = 0
-
-            while pointer < len(needed):
-                chunk = needed[pointer: pointer + BATCH]
-                got = {}
-                peers_cycle = peer_list[:]
-
-                def fetch_one(hdr, peer_url):
-                    return hdr["index"], self._fetch_block_body(peer_url, hdr["index"], hdr["hash"])
-
-                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-                    futs = []
-                    for i, hdr in enumerate(chunk):
-                        peer_url = peers_cycle[i % len(peers_cycle)]
-                        futs.append(ex.submit(fetch_one, hdr, peer_url))
-                    for fut in as_completed(futs):
-                        try:
-                            idx, blk = fut.result()
-                            if blk is not None:
-                                got[idx] = blk
-                        except Exception:
-                            pass
-
-                missing_in_chunk = [h for h in chunk if h["index"] not in got]
-                if missing_in_chunk:
-                    for hdr in missing_in_chunk:
-                        for peer_url in peers_cycle:
-                            blk = self._fetch_block_body(peer_url, hdr["index"], hdr["hash"], timeout=10)
-                            if blk is not None:
-                                got[hdr["index"]] = blk
-                                break
-
-                ordered = []
-                for hdr in chunk:
-                    blk = got.get(hdr["index"])
-                    if blk is None:
-                        break
-                    if hdr["index"] > 0 and blk.get("previous_hash") != hdr.get("previous_hash"):
-                        print(f"[!] Rejected block {hdr['index']}: previous_hash mismatch")
-                        break
-                    ordered.append(blk)
-
-                if not ordered:
-                    stall_rounds += 1
-                    if stall_rounds >= 3:
-                        print("[!] Sync stalled; rotating peers and retrying next cycle")
-                        break
-                    continue
-
-                blocks_to_adopt.extend(ordered)
-                pointer += len(ordered)
-                stall_rounds = 0
-                last_progress = ordered[-1]["index"]
-                self._last_sync_progress = last_progress
-                print(f"[+] Downloaded bodies through index {last_progress}/{self._target_height}")
-
-            if blocks_to_adopt:
-                expected_idx = common + 1
-                clean = []
-                for b in blocks_to_adopt:
-                    if b["index"] != expected_idx:
-                        print(f"[!] Gap detected before apply at expected {expected_idx}, got {b['index']}; stopping")
-                        break
-                    clean.append(b)
-                    expected_idx += 1
-                if clean:
-                    adopted, msg = self.adopt_chain(clean)
-                    if adopted:
-                        print(f"[*] Adopted chain segment: {msg} (now height {clean[-1]['index']})")
-                    else:
-                        print(f"[!] adopt_chain failed: {msg}")
-
-            self._fill_local_gaps(peer_list)
-
-            gaps = self.find_gaps()
-            self._sync_gaps = gaps
-            cont = self.contiguous_height()
-            if not gaps and cont >= self._target_height and self.chain_work() >= best_work:
-                self._synced = True
-                print(f"[*] Fully synced to height {cont}")
-            else:
-                self._synced = False
-                if gaps:
-                    print(f"[!] Remaining gaps ({len(gaps)}): {gaps[:20]}{'...' if len(gaps) > 20 else ''}")
-        finally:
-            self._sync_in_progress = False
-
-    def _fill_local_gaps(self, peer_list=None):
-        """Re-request every missing index until the chain is contiguous."""
-        gaps = self.find_gaps()
-        if not gaps:
-            return
-        if peer_list is None:
-            peer_list = [p for p in self.peers if p != self.my_node_url and p not in self._banned_peers]
-        if not peer_list:
-            return
-        print(f"[*] Filling {len(gaps)} local gaps...")
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        filled = []
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            futs = {}
-            for i, idx in enumerate(gaps):
-                peer = peer_list[i % len(peer_list)]
-                futs[ex.submit(self._fetch_block_body, peer, idx)] = idx
-            for fut in as_completed(futs):
-                idx = futs[fut]
-                try:
-                    blk = fut.result()
-                    if blk and blk.get("index") == idx:
-                        filled.append(blk)
-                except Exception:
-                    pass
-        if not filled:
-            return
-        filled.sort(key=lambda b: b["index"])
-        for blk in filled:
+        for peer in list(self.peers):
+            if peer == self.my_node_url:
+                continue
             try:
-                ok, msg, _ = self.add_block(blk, relay=False)
-                if ok:
-                    print(f"[+] Filled gap at index {blk['index']}")
-                else:
-                    for peer in peer_list:
-                        alt = self._fetch_block_body(peer, blk["index"])
-                        if alt:
-                            ok2, msg2, _ = self.add_block(alt, relay=False)
-                            if ok2:
-                                print(f"[+] Filled gap at index {blk['index']} from alternate peer")
-                                break
-            except Exception as e:
-                print(f"[!] Gap fill error at {blk.get('index')}: {e}")
+                self.sync_from_peer(peer)
+            except Exception:
+                continue
 
     def sync_from_peer(self, peer):
-        """Compatibility wrapper: single-peer sync still works, used by register_peer."""
-        if peer in self._banned_peers or peer == self.my_node_url:
+        res = requests.get(f"{peer}/chain/status", timeout=4)
+        if res.status_code != 200:
             return
-        st = self._query_peer_status(peer)
-        if not st:
+        remote = res.json()
+        if remote.get("genesis") != GENESIS_HASH:
             return
-        try:
-            remote_work = int(st.get("work", "0"))
-        except (TypeError, ValueError):
+        if int(remote.get("work", "0")) <= self.chain_work():
             return
-        if remote_work <= self.chain_work() and not self.find_gaps():
+        headers = requests.get(f"{peer}/headers?from=0", timeout=10).json().get("headers", [])
+        if not headers or headers[0].get("hash") != GENESIS_HASH:
             return
-        # Run the multi-peer path; best-peer selection will include this one
-        self.sync_from_peers()
+        local_tip_height = self.get_latest_block()["index"]
+        common = -1
+        for header in headers:
+            local = self.get_block_by_index(header["index"])
+            if local and local["hash"] == header["hash"]:
+                common = header["index"]
+            else:
+                break
+        if common == local_tip_height and common == headers[-1]["index"]:
+            return
+        blocks = []
+        for header in headers:
+            if header["index"] <= common:
+                continue
+            full = requests.get(f"{peer}/block/{header['index']}", timeout=5)
+            if full.status_code != 200:
+                return
+            block = full.json()["block"]
+            if block.get("hash") != header["hash"]:
+                return
+            blocks.append(block)
+        if not blocks:
+            return
+        adopted, msg = self.adopt_chain(blocks)
+        if adopted:
+            print(f"[*] Adopted heavier chain from {peer}: {msg} (height {blocks[-1]['index']})")
 
     def broadcast_block(self, block):
         for peer in list(self.peers):
-            if peer == self.my_node_url or peer in self._banned_peers:
+            if peer == self.my_node_url:
                 continue
             try:
                 requests.post(f"{peer}/block/submit", json=block, timeout=4)
@@ -1819,7 +1481,7 @@ class Blockchain:
 
     def broadcast_tx(self, tx):
         for peer in list(self.peers):
-            if peer == self.my_node_url or peer in self._banned_peers:
+            if peer == self.my_node_url:
                 continue
             try:
                 requests.post(f"{peer}/transaction/new", json=tx, timeout=3)
@@ -1829,20 +1491,22 @@ class Blockchain:
     def _clean_peer_url(self, url_str):
         if not url_str or not isinstance(url_str, str):
             return None
-        url_str = url_str.strip().rstrip("/")
-        try:
-            p = urlparse(url_str)
-            if p.scheme not in ("http", "https") or not p.netloc:
-                return None
-            return f"{p.scheme}://{p.netloc}"
-        except Exception:
+        parsed = urlparse(url_str.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
             return None
+        hostname = parsed.hostname
+        if hostname in ("localhost", "127.0.0.1", "0.0.0.0") or (
+            hostname and (
+                hostname.startswith("10.") or hostname.startswith("192.168.")
+                or hostname.startswith("169.254.")
+            )
+        ):
+            return None
+        return f"{parsed.scheme}://{parsed.netloc}"
 
     def register_peer(self, url_str, announce=True):
         clean_url = self._clean_peer_url(url_str)
-        if not clean_url or clean_url == self.my_node_url:
-            return False
-        if clean_url in self._banned_peers:
+        if not clean_url:
             return False
         with self._peer_lock:
             if len(self.peers) >= MAX_PEERS and clean_url not in self.peers:
@@ -1853,25 +1517,23 @@ class Blockchain:
                 self.save_peers()
         if is_new and announce:
             threading.Thread(target=self._announce_peer, args=(clean_url,), daemon=True).start()
-        return is_new
+        return True
 
     def _announce_peer(self, new_url):
         try:
-            st = self._query_peer_status(new_url, timeout=3)
-            if st is None:
-                return
             res = requests.get(f"{new_url}/peers", timeout=3)
             if res.status_code == 200:
                 for peer in res.json().get("peers", []):
                     self.register_peer(peer, announce=True)
+        except Exception:
+            pass
+        if self.my_node_url and self.my_node_url != new_url:
             try:
                 requests.post(f"{new_url}/peers/register", json={"url": self.my_node_url}, timeout=2)
             except Exception:
                 pass
-        except Exception:
-            pass
         for peer in list(self.peers):
-            if peer in (new_url, self.my_node_url) or peer in self._banned_peers:
+            if peer in (new_url, self.my_node_url):
                 continue
             try:
                 requests.post(f"{peer}/peers/register", json={"url": new_url}, timeout=2)
@@ -1883,31 +1545,18 @@ class Blockchain:
             pass
 
     def known_peers_for_clients(self):
-        peers = set(self.peers) - self._banned_peers
+        peers = set(self.peers)
         if self.my_node_url:
             peers.add(self.my_node_url)
         return sorted(peers)
 
     def start_network(self, my_node_url, bootstrap=None):
         self.my_node_url = self._clean_peer_url(my_node_url) or my_node_url
-        seeds = []
         if bootstrap:
-            seeds.append(bootstrap)
-        env_seeds = os.environ.get("BETIUM_BOOTSTRAP", "")
-        if env_seeds:
-            for s in env_seeds.split(","):
-                s = s.strip()
-                if s:
-                    seeds.append(s)
-        for s in seeds:
-            self.register_peer(s, announce=True)
-        cont = self.contiguous_height()
-        gaps = self.find_gaps()
-        self._sync_gaps = gaps
-        self._synced = False
-        if gaps:
-            print(f"[*] On start: contiguous height {cont}, {len(gaps)} gap(s) to repair")
+            self.register_peer(bootstrap, announce=True)
         threading.Thread(target=self._loop, args=(self.my_node_url,), daemon=True).start()
+        # Auto-mine pending transfers so users never have to run a miner themselves.
+        # With MIN_DIFFICULTY_BITS lowered, a single node can confirm txs in seconds.
         threading.Thread(target=self._auto_mine_loop, daemon=True).start()
 
     def _auto_mine_loop(self):
@@ -1977,12 +1626,9 @@ class Blockchain:
 
     def _loop(self, my_node_url):
         while True:
-            try:
-                self.sync_from_peers()
-            except Exception as e:
-                print(f"[!] sync_from_peers error: {e}")
+            self.sync_from_peers()
             for peer in list(self.peers):
-                if peer == my_node_url or peer in self._banned_peers:
+                if peer == my_node_url:
                     continue
                 try:
                     res = requests.get(f"{peer}/peers", timeout=3)
@@ -1991,8 +1637,9 @@ class Blockchain:
                             self.register_peer(item, announce=True)
                     requests.post(f"{peer}/peers/register", json={"url": my_node_url}, timeout=2)
                 except Exception:
-                    self._note_peer_fail(peer)
+                    pass
             time.sleep(20)
+
 
 blockchain = Blockchain()
 
@@ -2248,6 +1895,27 @@ def add_cors(resp):
     return resp
 
 
+
+_EXPLORER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "explorer.html")
+_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "betium_logo.png")
+
+
+@app.route("/explorer", methods=["GET"])
+@app.route("/explorer/", methods=["GET"])
+def explorer_ui():
+    """Lightweight HTML block explorer (static file, no build step)."""
+    if os.path.isfile(_EXPLORER_PATH):
+        return send_file(_EXPLORER_PATH, mimetype="text/html; charset=utf-8")
+    return Response("<h1>Explorer UI missing</h1>", status=500, mimetype="text/html")
+
+
+@app.route("/static/betium_logo.png", methods=["GET"])
+def betium_logo():
+    if os.path.isfile(_LOGO_PATH):
+        return send_file(_LOGO_PATH, mimetype="image/png")
+    return jsonify({"error": "Not found"}), 404
+
+
 @app.route("/rpc", methods=["POST", "OPTIONS"])
 @app.route("/", methods=["POST", "OPTIONS"])
 def eth_rpc():
@@ -2278,6 +1946,7 @@ def root_info():
     return jsonify({
         "name": "Betium", "symbol": NATIVE_TOKEN, "protocol_version": PROTOCOL_VERSION,
         "chain_id": ETH_CHAIN_ID, "rpc": "/rpc", "network": "/network", "status": "/chain/status",
+        "explorer": "/explorer",
     })
 
 

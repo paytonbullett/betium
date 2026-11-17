@@ -445,26 +445,26 @@ class RpcError(Exception):
 
 def network_params(rpc_url=None):
     """wallet_addEthereumChain parameters / the values to type into MetaMask."""
-    # iconUrls: host a 256×256 (or 512×512) PNG of the Betium logo at a public
-    # HTTPS URL and list it here. MetaMask caches the first icon it sees.
-    # Example after you upload betium_logo.png:
-    #   "iconUrls": ["https://crypto.bullettsocial.space/static/betium_logo.png"]
+    # iconUrls / blockExplorerUrls are derived from the node origin when rpc_url is set.
     icon_base = None
+    explorer_base = None
     if rpc_url:
-        # Derive a sensible default icon path from the RPC origin when possible.
         try:
             from urllib.parse import urlparse
             p = urlparse(rpc_url)
-            icon_base = f"{p.scheme}://{p.netloc}/static/betium_logo.png"
+            origin = f"{p.scheme}://{p.netloc}"
+            icon_base = f"{origin}/static/betium_logo.png"
+            explorer_base = f"{origin}/explorer"
         except Exception:
             icon_base = None
+            explorer_base = None
     return {
         "chainId": _hex(ETH_CHAIN_ID),
         "chainIdDecimal": ETH_CHAIN_ID,
         "chainName": NETWORK_NAME,
         "nativeCurrency": {"name": "Betium", "symbol": NATIVE_TOKEN, "decimals": DECIMALS},
         "rpcUrls": [rpc_url] if rpc_url else [],
-        "blockExplorerUrls": [],
+        "blockExplorerUrls": [explorer_base] if explorer_base else [],
         "iconUrls": [icon_base] if icon_base else [],
     }
 

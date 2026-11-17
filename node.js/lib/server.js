@@ -17,6 +17,7 @@ const {
 } = C;
 
 const LOGO_FILE = path.join(__dirname, '..', 'betium_logo.png');
+const EXPLORER_FILE = path.join(__dirname, '..', 'explorer.html');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -311,7 +312,17 @@ function createServer(chain) {
     rpc: '/rpc',
     network: '/network',
     status: '/chain/status',
+    explorer: '/explorer',
   }]);
+
+  // Lightweight HTML block explorer (no build step).
+  add(['GET'], /^\/explorer\/?$/, async () => {
+    try {
+      return { raw: fs.readFileSync(EXPLORER_FILE), type: 'text/html; charset=utf-8' };
+    } catch {
+      return [500, { error: 'Explorer UI missing' }];
+    }
+  });
 
   // Extra: the MetaMask network icon referenced by GET /network (iconUrls).
   add(['GET'], /^\/static\/betium_logo\.png$/, async () => {

@@ -357,14 +357,18 @@ function accountId(value) {
 }
 
 function networkParams(rpcUrl) {
-  // iconUrls: the node serves /static/betium_logo.png itself; MetaMask caches the first icon.
+  // iconUrls / blockExplorerUrls derived from the node origin when rpcUrl is set.
   let iconBase = null;
+  let explorerBase = null;
   if (rpcUrl) {
     try {
       const u = new URL(rpcUrl);
-      iconBase = `${u.protocol}//${u.host}/static/betium_logo.png`;
+      const origin = `${u.protocol}//${u.host}`;
+      iconBase = `${origin}/static/betium_logo.png`;
+      explorerBase = `${origin}/explorer`;
     } catch {
       iconBase = null;
+      explorerBase = null;
     }
   }
   return {
@@ -373,7 +377,7 @@ function networkParams(rpcUrl) {
     chainName: NETWORK_NAME,
     nativeCurrency: { name: 'Betium', symbol: NATIVE_TOKEN, decimals: DECIMALS },
     rpcUrls: rpcUrl ? [rpcUrl] : [],
-    blockExplorerUrls: [],
+    blockExplorerUrls: explorerBase ? [explorerBase] : [],
     iconUrls: iconBase ? [iconBase] : [],
   };
 }

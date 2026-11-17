@@ -88,6 +88,15 @@ class Blockchain {
     this.syncing = new Set();
     this.inTx = false;
     this.db = new Db(this.dbFile);
+    // Sync observability & peer hygiene
+    this.bannedPeers = new Set();
+    this.peerFailCounts = new Map();
+    this.selectedPeers = [];
+    this.targetHeight = 0;
+    this.targetWork = 0n;
+    this.syncGaps = [];
+    this.synced = false;
+    this.syncInProgress = false;
     this.initDb();
   }
 
@@ -1032,12 +1041,31 @@ class Blockchain {
 
   status() {
     const tip = this.getLatestBlock();
+    const height = tip ? tip.index : 0;
+    const gaps = this.findGaps();
+    const contiguous = this.contiguousHeight();
+    let synced = false;
+    if (this.targetHeight > 0) {
+      synced = this.synced && gaps.length === 0 && height >= this.targetHeight;
+    } else {
+      synced = gaps.length === 0 && contiguous === height;
+    }
     return {
       genesis: GENESIS_HASH,
-      height: tip.index,
-      tip: tip.hash,
+      height,
+      tip: tip ? tip.hash : null,
       work: String(this.chainWork()),
       protocol_version: PROTOCOL_VERSION,
+      target_height: this.targetHeight,
+      target_work: String(this.targetWork),
+      contiguous_height: contiguous,
+      gaps: gaps.slice(0, 50),
+      gap_count: gaps.length,
+      selected_peers: this.selectedPeers.slice(0, 10),
+      peer_count: this.peers.size,
+      banned_peers: this.bannedPeers.size,
+      synced: !!synced,
+      sync_in_progress: this.syncInProgress,
     };
   }
 
@@ -1051,151 +1079,341 @@ class Blockchain {
     }));
   }
 
-  // ---- read-only transaction search -------------------------------------
-
-  /**
-   * One confirmed transaction as returned by the search endpoints.
-   * Emits both NETWORK coinbase rewards and every user-to-user (P2P)
-   * transfer / create_token / eth_raw transaction included in the block.
-   */
-  txView(tx, row, index) {
-    let txHash = null;
-    try {
-      // MetaMask transactions have a real Ethereum hash; native ones use the same
-      // SHA-256 of the canonical JSON that the block's merkle tree is built from.
-      txHash = tx.eth_raw
-        ? eth.decodeRawTx(tx.eth_raw).hash
-        : crypto.createHash('sha256').update(dumps(canonicalTx(tx))).digest('hex');
-    } catch {
-      txHash = null;
-    }
-    const sender = tx.sender;
-    const action = tx.action;
-    let txType;
-    if (sender === 'NETWORK') txType = 'reward';
-    else if (action === 'create_token') txType = 'token_create';
-    else if (action) txType = action;
-    else txType = 'transfer';
-    const view = {
-      tx_hash: txHash,
-      block_index: row.idx,
-      block_hash: row.hash,
-      tx_index: index,
-      timestamp: row.timestamp,
-      sender,
-      recipient: tx.recipient,
-      amount: parseUnits(tx.amount),
-      fee: parseUnits(tx.fee) || 0,
-      token_id: tx.token_id || NATIVE_TOKEN,
-      tx_type: txType,
-    };
-    if (action) view.action = action;
-    return view;
-  }
-
-  /**
-   * Read-only. Newest-first confirmed transactions.
-   *
-   * Filters (all optional):
-   *   address         – lowercase sender or recipient match
-   *   tokenId         – only this token (BETM or sub-token)
-   *   onlyRewards     – only NETWORK coinbase rewards
-   *   excludeRewards  – drop NETWORK rewards (P2P / token activity only)
-   *
-   * Walks blocks from the tip down and stops as soon as `limit` results are
-   * found. Never touches state, the mempool or consensus.
-   */
-  scanTransactions(limit, address = null, tokenId = null, onlyRewards = false, excludeRewards = false) {
-    const out = [];
-    const like = address ? `%"${address}"%` : null; // cheap pre-filter, exact match below
-    const wantToken = tokenId ? String(tokenId).toUpperCase() : null;
-    let cursor = this.getLatestBlock().index;
-    while (cursor >= 0 && out.length < limit) {
-      const rows = like
-        ? this.db.all(
-          'SELECT idx, timestamp, hash, transactions FROM blocks WHERE idx <= ? AND transactions LIKE ? ORDER BY idx DESC LIMIT 100',
-          cursor, like,
-        )
-        : this.db.all(
-          'SELECT idx, timestamp, hash, transactions FROM blocks WHERE idx <= ? ORDER BY idx DESC LIMIT 100',
-          cursor,
-        );
-      if (!rows.length) break;
-      for (const row of rows) {
-        let txs;
-        try {
-          txs = JSON.parse(row.transactions);
-        } catch {
-          continue;
-        }
-        if (!Array.isArray(txs)) continue;
-        // Newest-first inside the block so P2P transfers that sit before the
-        // coinbase reward still appear in chronological order.
-        for (let i = txs.length - 1; i >= 0 && out.length < limit; i--) {
-          const tx = txs[i];
-          if (!tx || typeof tx !== 'object') continue;
-          const isReward = tx.sender === 'NETWORK';
-          if (onlyRewards && !isReward) continue;
-          if (excludeRewards && isReward) continue;
-          if (address && String(tx.sender).toLowerCase() !== address && String(tx.recipient).toLowerCase() !== address) continue;
-          if (wantToken !== null) {
-            const tid = String(tx.token_id || NATIVE_TOKEN).toUpperCase();
-            if (tid !== wantToken) continue;
-          }
-          out.push(this.txView(tx, row, i));
-        }
-        if (out.length >= limit) break;
+  contiguousHeight() {
+    const rows = this.db.all('SELECT idx, hash, previous_hash FROM blocks ORDER BY idx');
+    if (!rows.length) return -1;
+    let expected = 0;
+    let prevHash = null;
+    for (const r of rows) {
+      if (r.idx !== expected) return expected - 1;
+      if (expected === 0) {
+        if (r.hash !== GENESIS_HASH) return -1;
+      } else if (r.previous_hash !== prevHash) {
+        return expected - 1;
       }
-      cursor = rows[rows.length - 1].idx - 1;
+      prevHash = r.hash;
+      expected += 1;
     }
-    return out;
+    return expected - 1;
   }
 
-  // ---- networking -------------------------------------------------------
+  findGaps(upTo = null) {
+    const rows = this.db.all('SELECT idx FROM blocks ORDER BY idx');
+    const present = new Set(rows.map((r) => r.idx));
+    if (!present.size) return [];
+    let hi = Math.max(...present);
+    if (upTo != null) hi = Math.min(hi, upTo | 0);
+    const gaps = [];
+    for (let i = 0; i <= hi; i++) if (!present.has(i)) gaps.push(i);
+    return gaps;
+  }
+
+  _banPeer(peer, reason) {
+    if (!peer) return;
+    this.bannedPeers.add(peer);
+    this.peers.delete(peer);
+    this.savePeers();
+    console.log(`[!] Banned peer ${peer}: ${reason}`);
+  }
+
+  _notePeerFail(peer) {
+    if (!peer) return;
+    const c = (this.peerFailCounts.get(peer) || 0) + 1;
+    this.peerFailCounts.set(peer, c);
+    if (c >= 5) {
+      this.bannedPeers.add(peer);
+      this.peers.delete(peer);
+      this.savePeers();
+      console.log(`[!] Dropping unresponsive peer ${peer} after ${c} failures`);
+    }
+  }
+
+  _notePeerOk(peer) {
+    this.peerFailCounts.set(peer, 0);
+  }
+
+  async _queryPeerStatus(peer, timeout = 4000) {
+    try {
+      const res = await fetchJson(`${peer}/chain/status`, timeout);
+      if (res.status !== 200 || !res.json) {
+        this._notePeerFail(peer);
+        return null;
+      }
+      const data = res.json;
+      if (data.genesis !== GENESIS_HASH) {
+        this._banPeer(peer, 'genesis mismatch');
+        return null;
+      }
+      this._notePeerOk(peer);
+      return data;
+    } catch {
+      this._notePeerFail(peer);
+      return null;
+    }
+  }
+
+  async _selectBestPeers(need = 3) {
+    const candidates = [];
+    for (const peer of [...this.peers]) {
+      if (peer === this.myNodeUrl || this.bannedPeers.has(peer)) continue;
+      const st = await this._queryPeerStatus(peer);
+      if (!st) continue;
+      let work, height;
+      try {
+        work = BigInt(st.work || '0');
+        height = Number(st.height || 0);
+      } catch {
+        continue;
+      }
+      candidates.push({ work, height, peer, st });
+    }
+    candidates.sort((a, b) => (a.work === b.work ? b.height - a.height : (a.work < b.work ? 1 : -1)));
+    this.selectedPeers = candidates.slice(0, need).map((c) => c.peer);
+    if (candidates.length) {
+      this.targetWork = candidates[0].work;
+      this.targetHeight = candidates[0].height;
+    }
+    return candidates.slice(0, need);
+  }
+
+  async _downloadHeaders(peer, fromIdx = 0, timeout = 15000) {
+    try {
+      const res = await fetchJson(`${peer}/headers?from=${fromIdx}`, timeout);
+      if (res.status !== 200 || !res.json) return null;
+      const headers = res.json.headers || [];
+      if (!headers.length) return [];
+      const verified = [];
+      let prev = null;
+      for (const h of headers) {
+        if (!h || h.index == null || !h.hash || h.previous_hash == null) return null;
+        if (prev !== null) {
+          if (h.index !== prev.index + 1 || h.previous_hash !== prev.hash) {
+            console.log(`[!] Header chain break from ${peer} at index ${h.index}`);
+            return null;
+          }
+        }
+        prev = h;
+        verified.push(h);
+      }
+      return verified;
+    } catch (e) {
+      console.log(`[!] Header download failed from ${peer}: ${e.message || e}`);
+      this._notePeerFail(peer);
+      return null;
+    }
+  }
+
+  async _fetchBlockBody(peer, index, expectedHash = null, timeout = 8000) {
+    try {
+      const res = await fetchJson(`${peer}/block/${index}`, timeout);
+      if (res.status !== 200 || !res.json || !res.json.block) return null;
+      const block = res.json.block;
+      if (expectedHash && block.hash !== expectedHash) return null;
+      if (block.index !== index) return null;
+      return block;
+    } catch {
+      return null;
+    }
+  }
+
+  _findCommonAncestor(headers) {
+    let common = -1;
+    for (const h of headers) {
+      const local = this.getBlockByIndex(h.index);
+      if (local && local.hash === h.hash) common = h.index;
+      else break;
+    }
+    return common;
+  }
 
   async syncFromPeers() {
-    for (const peer of [...this.peers]) {
-      if (peer === this.myNodeUrl) continue;
+    if (this.syncInProgress) return;
+    this.syncInProgress = true;
+    try {
+      const best = await this._selectBestPeers(5);
+      if (!best.length) {
+        await this._fillLocalGaps();
+        return;
+      }
+      const localWork = this.chainWork();
+      const { work: bestWork, height: bestHeight, peer: bestPeer } = best[0];
+      if (bestWork <= localWork && this.findGaps().length === 0) {
+        this.synced = true;
+        this.targetHeight = bestHeight;
+        this.targetWork = bestWork;
+        return;
+      }
+
+      const peerList = best.map((c) => c.peer);
+      let headers = null;
+      let source = null;
+      for (const peer of peerList) {
+        headers = await this._downloadHeaders(peer, 0);
+        if (headers && headers.length && headers[0].hash === GENESIS_HASH) {
+          source = peer;
+          break;
+        }
+      }
+      if (!headers) {
+        console.log('[!] Could not obtain a valid header chain from any peer');
+        return;
+      }
+      if (headers[0].hash !== GENESIS_HASH || headers[0].index !== 0) {
+        this._banPeer(source, 'headers do not start at genesis');
+        return;
+      }
+
+      const common = this._findCommonAncestor(headers);
+      this.targetHeight = headers[headers.length - 1].index;
+      console.log(`[*] Syncing from ${source}: common=${common} target=${this.targetHeight} (local work=${localWork} remote work=${bestWork})`);
+
+      const needed = headers.filter((h) => h.index > common);
+      if (!needed.length && this.findGaps().length === 0) {
+        this.synced = true;
+        return;
+      }
+
+      const BATCH = 32;
+      const blocksToAdopt = [];
+      let pointer = 0;
+      let stallRounds = 0;
+
+      while (pointer < needed.length) {
+        const chunk = needed.slice(pointer, pointer + BATCH);
+        const got = new Map();
+
+        const fetches = chunk.map((hdr, i) => {
+          const peerUrl = peerList[i % peerList.length];
+          return this._fetchBlockBody(peerUrl, hdr.index, hdr.hash).then((blk) => {
+            if (blk) got.set(hdr.index, blk);
+          });
+        });
+        await Promise.all(fetches);
+
+        // Retry missing
+        for (const hdr of chunk) {
+          if (got.has(hdr.index)) continue;
+          for (const peerUrl of peerList) {
+            const blk = await this._fetchBlockBody(peerUrl, hdr.index, hdr.hash, 10000);
+            if (blk) {
+              got.set(hdr.index, blk);
+              break;
+            }
+          }
+        }
+
+        const ordered = [];
+        for (const hdr of chunk) {
+          const blk = got.get(hdr.index);
+          if (!blk) break;
+          if (hdr.index > 0 && blk.previous_hash !== hdr.previous_hash) {
+            console.log(`[!] Rejected block ${hdr.index}: previous_hash mismatch`);
+            break;
+          }
+          ordered.push(blk);
+        }
+
+        if (!ordered.length) {
+          stallRounds += 1;
+          if (stallRounds >= 3) {
+            console.log('[!] Sync stalled; rotating peers and retrying next cycle');
+            break;
+          }
+          continue;
+        }
+
+        blocksToAdopt.push(...ordered);
+        pointer += ordered.length;
+        stallRounds = 0;
+        console.log(`[+] Downloaded bodies through index ${ordered[ordered.length - 1].index}/${this.targetHeight}`);
+      }
+
+      if (blocksToAdopt.length) {
+        let expectedIdx = common + 1;
+        const clean = [];
+        for (const b of blocksToAdopt) {
+          if (b.index !== expectedIdx) {
+            console.log(`[!] Gap detected before apply at expected ${expectedIdx}, got ${b.index}; stopping`);
+            break;
+          }
+          clean.push(b);
+          expectedIdx += 1;
+        }
+        if (clean.length) {
+          const [adopted, msg] = this.adoptChain(clean);
+          if (adopted) console.log(`[*] Adopted chain segment: ${msg} (now height ${clean[clean.length - 1].index})`);
+          else console.log(`[!] adoptChain failed: ${msg}`);
+        }
+      }
+
+      await this._fillLocalGaps(peerList);
+
+      const gaps = this.findGaps();
+      this.syncGaps = gaps;
+      const cont = this.contiguousHeight();
+      if (!gaps.length && cont >= this.targetHeight && this.chainWork() >= bestWork) {
+        this.synced = true;
+        console.log(`[*] Fully synced to height ${cont}`);
+      } else {
+        this.synced = false;
+        if (gaps.length) console.log(`[!] Remaining gaps (${gaps.length}): ${gaps.slice(0, 20).join(',')}${gaps.length > 20 ? '...' : ''}`);
+      }
+    } finally {
+      this.syncInProgress = false;
+    }
+  }
+
+  async _fillLocalGaps(peerList = null) {
+    const gaps = this.findGaps();
+    if (!gaps.length) return;
+    if (!peerList) {
+      peerList = [...this.peers].filter((p) => p !== this.myNodeUrl && !this.bannedPeers.has(p));
+    }
+    if (!peerList.length) return;
+    console.log(`[*] Filling ${gaps.length} local gaps...`);
+    const filled = [];
+    const fetches = gaps.map((idx, i) => {
+      const peer = peerList[i % peerList.length];
+      return this._fetchBlockBody(peer, idx).then((blk) => {
+        if (blk && blk.index === idx) filled.push(blk);
+      });
+    });
+    await Promise.all(fetches);
+    filled.sort((a, b) => a.index - b.index);
+    for (const blk of filled) {
       try {
-        await this.syncFromPeer(peer);
-      } catch {
-        // peer unreachable or misbehaving
+        const [ok] = this.addBlock(blk, false);
+        if (ok) {
+          console.log(`[+] Filled gap at index ${blk.index}`);
+        } else {
+          for (const peer of peerList) {
+            const alt = await this._fetchBlockBody(peer, blk.index);
+            if (alt) {
+              const [ok2] = this.addBlock(alt, false);
+              if (ok2) {
+                console.log(`[+] Filled gap at index ${blk.index} from alternate peer`);
+                break;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.log(`[!] Gap fill error at ${blk.index}: ${e.message || e}`);
       }
     }
   }
 
   async syncFromPeer(peer) {
+    if (this.bannedPeers.has(peer) || peer === this.myNodeUrl) return;
     if (this.syncing.has(peer)) return;
     this.syncing.add(peer);
     try {
-      const res = await fetchJson(`${peer}/chain/status`, 4000);
-      if (res.status !== 200 || !res.json) return;
-      const remote = res.json;
-      if (remote.genesis !== GENESIS_HASH) return;
-      if (BigInt(remote.work || '0') <= this.chainWork()) return;
-      const hres = await fetchJson(`${peer}/headers?from=0`, 10000);
-      const headers = (hres.json && hres.json.headers) || [];
-      if (!headers.length || headers[0].hash !== GENESIS_HASH) return;
-      const localTipHeight = this.getLatestBlock().index;
-      let common = -1;
-      for (const header of headers) {
-        const local = this.getBlockByIndex(header.index);
-        if (local && local.hash === header.hash) common = header.index;
-        else break;
-      }
-      if (common === localTipHeight && common === headers[headers.length - 1].index) return;
-      const blocks = [];
-      for (const header of headers) {
-        if (header.index <= common) continue;
-        const full = await fetchJson(`${peer}/block/${header.index}`, 5000);
-        if (full.status !== 200 || !full.json || !full.json.block) return;
-        const block = full.json.block;
-        if (block.hash !== header.hash) return;
-        blocks.push(block);
-      }
-      if (!blocks.length) return;
-      const [adopted, msg] = this.adoptChain(blocks);
-      if (adopted) console.log(`[*] Adopted heavier chain from ${peer}: ${msg} (height ${blocks[blocks.length - 1].index})`);
+      const st = await this._queryPeerStatus(peer);
+      if (!st) return;
+      let remoteWork;
+      try { remoteWork = BigInt(st.work || '0'); } catch { return; }
+      if (remoteWork <= this.chainWork() && this.findGaps().length === 0) return;
+      await this.syncFromPeers();
     } finally {
       this.syncing.delete(peer);
     }
@@ -1203,14 +1421,14 @@ class Blockchain {
 
   broadcastBlock(block) {
     for (const peer of [...this.peers]) {
-      if (peer === this.myNodeUrl) continue;
+      if (peer === this.myNodeUrl || this.bannedPeers.has(peer)) continue;
       postJson(`${peer}/block/submit`, block, 4000).catch(() => {});
     }
   }
 
   broadcastTx(tx) {
     for (const peer of [...this.peers]) {
-      if (peer === this.myNodeUrl) continue;
+      if (peer === this.myNodeUrl || this.bannedPeers.has(peer)) continue;
       postJson(`${peer}/transaction/new`, tx, 3000).catch(() => {});
     }
   }
@@ -1219,7 +1437,8 @@ class Blockchain {
 
   registerPeer(urlStr, announce = true) {
     const clean = cleanPeerUrl(urlStr);
-    if (!clean) return false;
+    if (!clean || clean === this.myNodeUrl) return false;
+    if (this.bannedPeers.has(clean)) return false;
     if (this.peers.size >= MAX_PEERS && !this.peers.has(clean)) return false;
     const isNew = !this.peers.has(clean);
     if (isNew) {
@@ -1227,11 +1446,13 @@ class Blockchain {
       this.savePeers();
     }
     if (isNew && announce) this.announcePeer(clean).catch(() => {});
-    return true;
+    return isNew;
   }
 
   async announcePeer(newUrl) {
     try {
+      const st = await this._queryPeerStatus(newUrl, 3000);
+      if (!st) return;
       const res = await fetchJson(`${newUrl}/peers`, 3000);
       if (res.status === 200 && res.json) for (const p of res.json.peers || []) this.registerPeer(p, true);
     } catch {
@@ -1245,7 +1466,7 @@ class Blockchain {
       }
     }
     for (const peer of [...this.peers]) {
-      if (peer === newUrl || peer === this.myNodeUrl) continue;
+      if (peer === newUrl || peer === this.myNodeUrl || this.bannedPeers.has(peer)) continue;
       try {
         await postJson(`${peer}/peers/register`, { url: newUrl }, 2000);
       } catch {
@@ -1260,16 +1481,29 @@ class Blockchain {
   }
 
   knownPeersForClients() {
-    const peers = new Set(this.peers);
+    const peers = new Set([...this.peers].filter((p) => !this.bannedPeers.has(p)));
     if (this.myNodeUrl) peers.add(this.myNodeUrl);
     return [...peers].sort();
   }
 
   startNetwork(myNodeUrl, bootstrap = null) {
     this.myNodeUrl = cleanPeerUrl(myNodeUrl) || myNodeUrl;
-    if (bootstrap) this.registerPeer(bootstrap, true);
+    const seeds = [];
+    if (bootstrap) seeds.push(bootstrap);
+    const envSeeds = process.env.BETIUM_BOOTSTRAP || '';
+    if (envSeeds) {
+      for (const s of envSeeds.split(',')) {
+        const t = s.trim();
+        if (t) seeds.push(t);
+      }
+    }
+    for (const s of seeds) this.registerPeer(s, true);
+    const cont = this.contiguousHeight();
+    const gaps = this.findGaps();
+    this.syncGaps = gaps;
+    this.synced = false;
+    if (gaps.length) console.log(`[*] On start: contiguous height ${cont}, ${gaps.length} gap(s) to repair`);
     this.networkLoop(this.myNodeUrl).catch(() => {});
-    // Auto-mine pending transfers so users never have to run a miner themselves.
     this.autoMineLoop().catch(() => {});
   }
 
@@ -1337,6 +1571,27 @@ class Blockchain {
             await postJson(`${peer}/peers/register`, { url: myNodeUrl }, 2000);
           } catch {
             // ignore unreachable peers
+          }
+        }
+      } catch {
+        // keep looping
+      }
+      await sleep(20000);
+    }
+  }
+
+  async networkLoop(myNodeUrl) {
+    for (;;) {
+      try {
+        await this.syncFromPeers();
+        for (const peer of [...this.peers]) {
+          if (peer === myNodeUrl || this.bannedPeers.has(peer)) continue;
+          try {
+            const res = await fetchJson(`${peer}/peers`, 3000);
+            if (res.status === 200 && res.json) for (const item of res.json.peers || []) this.registerPeer(item, true);
+            await postJson(`${peer}/peers/register`, { url: myNodeUrl }, 2000);
+          } catch {
+            this._notePeerFail(peer);
           }
         }
       } catch {
